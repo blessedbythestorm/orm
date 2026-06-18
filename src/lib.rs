@@ -13,6 +13,7 @@
 extern crate self as orm;
 
 pub mod cli;
+pub mod client;
 pub mod migrate;
 pub mod query;
 pub mod registry;
@@ -20,6 +21,6 @@ pub mod schema;
 pub mod style;
 pub mod traits;
 
-pub use macros::{api_type, enum_type, json_type, table_type};
+pub use macros::{api_type, endpoint, enum_type, json_type, table_type};
 pub use registry::{TypeExport, export_all_types};
 pub use traits::{FromRow, QueryExt};

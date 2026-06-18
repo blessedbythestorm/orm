@@ -35,10 +35,23 @@ struct Cli {
 enum Command {
     /// Export ts-rs bindings for every registered type.
     Export {
-        /// Output directory (sets TS_RS_EXPORT_DIR). Defaults to the value the
-        /// caller passed to `main`, so a bare `export` Just Works.
+        /// ts-rs output directory (sets TS_RS_EXPORT_DIR). Defaults to the value
+        /// the caller passed to `main`, so a bare `export` Just Works.
         #[arg(long, short)]
         out: Option<String>,
+        /// valibot schema output directory. Defaults to `--out`.
+        #[arg(long)]
+        schemas_out: Option<String>,
+    },
+    /// Generate the typed TypeScript API client from the `#[endpoint]` handlers.
+    GenClient {
+        /// Output directory for client.ts. Defaults to the value passed to `main`.
+        #[arg(long, short)]
+        out: Option<String>,
+        /// Import prefix for the ts-rs type modules (e.g. `$lib/types`). Defaults
+        /// to `.` (types co-located next to client.ts).
+        #[arg(long)]
+        types_import: Option<String>,
     },
     /// Generate and inspect schema migrations from the registered types.
     #[command(subcommand)]
@@ -48,12 +61,20 @@ enum Command {
 impl Command {
     fn run(self, default_out: &str) -> anyhow::Result<()> {
         match self {
-            Command::Export { out } => {
+            Command::Export { out, schemas_out } => {
                 let out = out.unwrap_or_else(|| default_out.to_string());
                 // SAFETY: process is single-threaded at this point (CLI startup),
                 // so racing on env vars is impossible.
                 unsafe { env::set_var("TS_RS_EXPORT_DIR", &out) };
-                crate::registry::export_all_types()
+                crate::registry::export_all_types()?;
+                crate::registry::export_valibot_schemas(&schemas_out.unwrap_or(out))
+            }
+            Command::GenClient { out, types_import } => {
+                let out = out.unwrap_or_else(|| default_out.to_string());
+                let types_import = types_import.unwrap_or_else(|| ".".to_string());
+                crate::client::generate_client(&out, &types_import)?;
+                eprintln!("Generated {out}/client.ts");
+                Ok(())
             }
             Command::Migrate(command) => command.run(),
         }

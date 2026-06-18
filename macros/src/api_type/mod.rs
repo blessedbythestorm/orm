@@ -1,6 +1,7 @@
 mod item_def;
 mod parse;
 mod registry;
+mod valibot;
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -28,9 +29,11 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let item_def = item_def::generate(&def, &input);
     let registry = registry::generate(&def);
+    let valibot = valibot::generate(&input);
 
     quote! {
         #item_def
         #registry
+        #valibot
     }
 }
