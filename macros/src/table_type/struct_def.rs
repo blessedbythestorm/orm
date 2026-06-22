@@ -11,7 +11,7 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
 
     let user_attrs: Vec<_> = input.attrs.iter().filter(|a| !a.path().is_ident("table_type")).collect();
 
-    let helper_attrs = ["pg", "crud"];
+    let helper_attrs = ["pg", "crud", "api"];
     let fields: Vec<_> = input
         .fields
         .iter()
@@ -22,12 +22,16 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
         })
         .collect();
 
+    let validate_impl = crate::api_type::validate::generate(name, &input.generics, &input.fields);
+
     quote! {
-        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, validator::Validate, ts_rs::TS)]
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
         #[ts(export, export_to = #export_path, optional_fields)]
         #(#user_attrs)*
         #vis struct #name {
             #(#fields),*
         }
+
+        #validate_impl
     }
 }

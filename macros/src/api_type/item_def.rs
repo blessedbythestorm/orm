@@ -18,15 +18,27 @@ fn generate_struct(input: &syn::ItemStruct, export_to: &str) -> TokenStream {
     let vis = &input.vis;
     let name = &input.ident;
     let generics = &input.generics;
-    let fields = &input.fields;
 
     let user_attrs: Vec<_> = input.attrs.iter().filter(|a| !a.path().is_ident("api_type")).collect();
 
+    // orm owns validation: generate `impl orm::Validate` from the fields'
+    // `#[api(validate(...))]` rules, then strip those markers off the emitted struct.
+    let validate_impl = super::validate::generate(name, generics, &input.fields);
+    let mut output = input.clone();
+    if let syn::Fields::Named(named) = &mut output.fields {
+        for field in &mut named.named {
+            field.attrs.retain(|a| !a.path().is_ident("api"));
+        }
+    }
+    let fields = &output.fields;
+
     quote! {
-        #[derive(Debug, serde::Deserialize, serde::Serialize, validator::Validate, ts_rs::TS)]
+        #[derive(Debug, serde::Deserialize, serde::Serialize, ts_rs::TS)]
         #[ts(export, export_to = #export_to, optional_fields)]
         #(#user_attrs)*
         #vis struct #name #generics #fields
+
+        #validate_impl
     }
 }
 

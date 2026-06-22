@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::model::{Column, DatabaseSchema, EnumType, Table, TableReference};
+use super::model::{Column, DatabaseSchema, EnumType, Table, TableReference, View, ViewReference};
 
 #[derive(Debug, Clone)]
 pub enum SchemaChange {
@@ -13,6 +13,8 @@ pub enum SchemaChange {
     DropTable(TableReference),
     RenameTable { table: TableReference, to: String },
     AlterColumn { table: TableReference, op: ColumnOp },
+    CreateView(View),
+    DropView(ViewReference),
     Comment(String),
 }
 
@@ -71,7 +73,11 @@ impl<'a> Differ<'a> {
     fn run(mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema) -> Vec<SchemaChange> {
         self.diff_schemas(baseline, desired);
         self.diff_enums(baseline, desired);
+        // A view depends on its base tables, so drop removed/changed views *before*
+        // touching tables and (re)create them *after* — keeping dependency order.
+        self.drop_views(baseline, desired);
         self.diff_tables(baseline, desired);
+        self.create_views(baseline, desired);
         self.changes
     }
 
@@ -107,6 +113,36 @@ impl<'a> Differ<'a> {
                 .collect();
             if !added.is_empty() {
                 self.emit(SchemaChange::AddEnumValues { name: name.clone(), values: added });
+            }
+        }
+    }
+
+    /// Drops views that were removed or whose definition changed. A changed view
+    /// is dropped here and recreated in [`create_views`] (CREATE OR REPLACE can't
+    /// alter a view's output columns, and a clean drop+recreate also frees any
+    /// base column the new definition no longer needs).
+    fn drop_views(&mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema) {
+        for (name, baseline_view) in &baseline.views {
+            let gone_or_changed = match desired.views.get(name) {
+                None => true,
+                Some(desired_view) => desired_view.definition != baseline_view.definition,
+            };
+            if gone_or_changed {
+                self.emit(SchemaChange::DropView(baseline_view.reference()));
+            }
+        }
+    }
+
+    /// Creates views that are new or whose definition changed (the matching drop
+    /// was emitted by [`drop_views`] before any table changes).
+    fn create_views(&mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema) {
+        for (name, desired_view) in &desired.views {
+            let new_or_changed = match baseline.views.get(name) {
+                None => true,
+                Some(baseline_view) => baseline_view.definition != desired_view.definition,
+            };
+            if new_or_changed {
+                self.emit(SchemaChange::CreateView(desired_view.clone()));
             }
         }
     }
@@ -249,6 +285,18 @@ fn invert_one(change: &SchemaChange, baseline: &DatabaseSchema) -> SchemaChange 
             to: table.name.clone(),
         },
         AlterColumn { table, op } => invert_column(baseline, table, op),
+        CreateView(view) => DropView(view.reference()),
+        DropView(view) => recreate_view(baseline, view),
+    }
+}
+
+fn recreate_view(baseline: &DatabaseSchema, view: &ViewReference) -> SchemaChange {
+    match baseline.views.get(&view.qualified_name()) {
+        Some(view) => SchemaChange::CreateView(view.clone()),
+        None => SchemaChange::Comment(format!(
+            "cannot recreate view {}: not in baseline",
+            view.qualified_name()
+        )),
     }
 }
 
@@ -327,6 +375,9 @@ fn schemas_of(database: &DatabaseSchema) -> BTreeSet<String> {
     let mut schemas = BTreeSet::new();
     for table in database.tables.values() {
         schemas.insert(table.schema.clone());
+    }
+    for view in database.views.values() {
+        schemas.insert(view.schema.clone());
     }
     for enum_type in database.enums.values() {
         if let Some((schema, _)) = enum_type.name.split_once('.') {

@@ -1,4 +1,5 @@
 mod enum_def;
+mod filter;
 mod parse;
 mod postgres;
 mod registry;
@@ -27,6 +28,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let serde = serde::generate(&def);
     let typescript = typescript::generate(&def);
     let postgres = postgres::generate(&def);
+    let filter = filter::generate(&def);
     let registry = registry::generate(&def);
     let schema = schema::generate(&def);
 
@@ -35,6 +37,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #serde
         #typescript
         #postgres
+        #filter
         #registry
         #schema
     }

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub struct DatabaseSchema {
     pub enums: BTreeMap<String, EnumType>,
     pub tables: BTreeMap<String, Table>,
+    #[serde(default)]
+    pub views: BTreeMap<String, View>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +89,40 @@ pub struct TableReference {
 }
 
 impl TableReference {
+    pub fn qualified_name(&self) -> String {
+        format!("{}.{}", self.schema, self.name)
+    }
+}
+
+/// A read-only database VIEW defined by a `#[view_type]` projection. `definition`
+/// is the raw SELECT body as declared in Rust. The migration engine diffs it as an
+/// opaque string (declared-vs-snapshot), so it round-trips without Postgres'
+/// view-definition normalization causing spurious diffs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct View {
+    pub schema: String,
+    pub name: String,
+    pub definition: String,
+}
+
+impl View {
+    pub fn qualified_name(&self) -> String {
+        format!("{}.{}", self.schema, self.name)
+    }
+
+    pub fn reference(&self) -> ViewReference {
+        ViewReference { schema: self.schema.clone(), name: self.name.clone() }
+    }
+}
+
+/// A lightweight handle to a view, for changes that don't need the definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewReference {
+    pub schema: String,
+    pub name: String,
+}
+
+impl ViewReference {
     pub fn qualified_name(&self) -> String {
         format!("{}.{}", self.schema, self.name)
     }

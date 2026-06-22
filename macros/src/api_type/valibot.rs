@@ -9,17 +9,13 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    Attribute, Expr, Fields, GenericArgument, Item, Lit, Meta, MetaNameValue, PathArguments, Token,
-    Type, punctuated::Punctuated,
+    Attribute, Fields, GenericArgument, Item, LitInt, LitStr, Meta, PathArguments, Token, Type,
+    punctuated::Punctuated,
 };
 
-/// A `#[validate]` rule that maps to a valibot pipe item.
-enum Rule {
-    /// Fully known at macro time, e.g. `v.email()` / `v.minLength(2)`.
-    Static(String),
-    /// `regex(path = <expr>)` — the pattern is read from the `Regex` at runtime.
-    Regex(Expr),
-}
+/// A `#[api(validate(...))]` rule as a fully-resolved valibot pipe item (every
+/// rule — including an inline `regex(r"...")` — is known at macro time).
+struct Rule(String);
 
 pub fn generate(input: &Item) -> TokenStream {
     let Item::Struct(item) = input else {
@@ -69,20 +65,12 @@ fn field_schema(ty: &Type, rules: &[Rule]) -> (String, Vec<TokenStream>) {
     }
 
     let (base, mut pipe) = scalar(ty);
-    let mut args = Vec::new();
     for rule in rules {
-        match rule {
-            Rule::Static(item) => pipe.push(item.clone()),
-            Rule::Regex(path) => {
-                pipe.push("v.regex(new RegExp({}))".to_string());
-                // serde_json gives a JS-safe, correctly-escaped string literal.
-                args.push(quote! { ::serde_json::to_string((#path).as_str()).unwrap() });
-            }
-        }
+        pipe.push(rule.0.clone());
     }
 
     let schema = if pipe.is_empty() { base } else { format!("v.pipe({base}, {})", pipe.join(", ")) };
-    (schema, args)
+    (schema, Vec::new())
 }
 
 /// `(base valibot type, intrinsic pipe items)` for a scalar Rust type.
@@ -102,22 +90,33 @@ fn scalar(ty: &Type) -> (String, Vec<String>) {
     }
 }
 
-/// Rules from a field's `#[validate(...)]` attributes.
+/// Rules from a field's `#[api(validate(...))]` attributes.
 fn validate_rules(attrs: &[Attribute]) -> Vec<Rule> {
     let mut rules = Vec::new();
     for attr in attrs {
-        if !attr.path().is_ident("validate") {
+        if !attr.path().is_ident("api") {
             continue;
         }
-        let Ok(metas) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) else {
+        // `#[api(validate(...))]` — unwrap each `validate(...)` list, then map its rules.
+        let Ok(items) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) else {
             continue;
         };
-        for meta in metas {
-            match meta {
-                Meta::Path(path) if path.is_ident("email") => rules.push(Rule::Static("v.email()".into())),
-                Meta::Path(path) if path.is_ident("url") => rules.push(Rule::Static("v.url()".into())),
-                Meta::List(list) => collect_list_rules(&list, &mut rules),
-                _ => {}
+        for item in items {
+            let Meta::List(validate) = item else { continue };
+            if !validate.path.is_ident("validate") {
+                continue;
+            }
+            let Ok(metas) = validate.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            else {
+                continue;
+            };
+            for meta in metas {
+                match meta {
+                    Meta::Path(path) if path.is_ident("email") => rules.push(Rule("v.email()".into())),
+                    Meta::Path(path) if path.is_ident("url") => rules.push(Rule("v.url()".into())),
+                    Meta::List(list) => collect_list_rules(&list, &mut rules),
+                    _ => {}
+                }
             }
         }
     }
@@ -128,12 +127,12 @@ fn collect_list_rules(list: &syn::MetaList, rules: &mut Vec<Rule>) {
     let key = list.path.get_ident().map(ToString::to_string).unwrap_or_default();
 
     if key == "regex" {
-        if let Ok(pairs) = list.parse_args_with(Punctuated::<MetaNameValue, Token![,]>::parse_terminated) {
-            for pair in pairs {
-                if pair.path.is_ident("path") {
-                    rules.push(Rule::Regex(pair.value));
-                }
-            }
+        // `regex(r"...")` — bake the inline pattern as a JS RegExp. Escape `{`/`}`
+        // so the pattern survives the runtime `format!` that assembles the schema.
+        if let Ok(lit) = list.parse_args::<LitStr>() {
+            let js = lit.value().replace('\\', "\\\\").replace('"', "\\\"");
+            let item = format!("v.regex(new RegExp(\"{js}\"))").replace('{', "{{").replace('}', "}}");
+            rules.push(Rule(item));
         }
         return;
     }
@@ -141,18 +140,21 @@ fn collect_list_rules(list: &syn::MetaList, rules: &mut Vec<Rule>) {
     if key != "length" && key != "range" {
         return;
     }
-    let Ok(pairs) = list.parse_args_with(Punctuated::<MetaNameValue, Token![,]>::parse_terminated) else {
+    // Call syntax: `length(min(3), max(30))` — each arg is `name(value)`.
+    let Ok(args) = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) else {
         return;
     };
-    for pair in pairs {
-        let field = pair.path.get_ident().map(ToString::to_string).unwrap_or_default();
-        let Some(n) = int_value(&pair.value) else { continue };
+    for arg in args {
+        let Meta::List(inner) = &arg else { continue };
+        let field = inner.path.get_ident().map(ToString::to_string).unwrap_or_default();
+        let Ok(value) = inner.parse_args::<LitInt>() else { continue };
+        let n = value.base10_digits();
         match (key.as_str(), field.as_str()) {
-            ("length", "min") => rules.push(Rule::Static(format!("v.minLength({n})"))),
-            ("length", "max") => rules.push(Rule::Static(format!("v.maxLength({n})"))),
-            ("length", "equal") => rules.push(Rule::Static(format!("v.length({n})"))),
-            ("range", "min") => rules.push(Rule::Static(format!("v.minValue({n})"))),
-            ("range", "max") => rules.push(Rule::Static(format!("v.maxValue({n})"))),
+            ("length", "min") => rules.push(Rule(format!("v.minLength({n})"))),
+            ("length", "max") => rules.push(Rule(format!("v.maxLength({n})"))),
+            ("length", "equal") => rules.push(Rule(format!("v.length({n})"))),
+            ("range", "min") => rules.push(Rule(format!("v.minValue({n})"))),
+            ("range", "max") => rules.push(Rule(format!("v.maxValue({n})"))),
             _ => {}
         }
     }
@@ -174,16 +176,6 @@ fn generic_inner(ty: &Type, wrapper: &str) -> Option<Type> {
 fn last_ident(ty: &Type) -> Option<String> {
     match ty {
         Type::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()),
-        _ => None,
-    }
-}
-
-fn int_value(expr: &Expr) -> Option<i64> {
-    match expr {
-        Expr::Lit(lit) => match &lit.lit {
-            Lit::Int(int) => int.base10_parse().ok(),
-            _ => None,
-        },
         _ => None,
     }
 }

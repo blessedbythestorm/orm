@@ -24,6 +24,10 @@ impl Display for SchemaChange {
                 write!(f, "ALTER TABLE {} RENAME TO {to};", table.qualified_name())
             }
             Self::AlterColumn { table, op } => write!(f, "ALTER TABLE {} {op};", table.qualified_name()),
+            Self::CreateView(view) => {
+                write!(f, "CREATE VIEW {} AS {};", view.qualified_name(), view.definition)
+            }
+            Self::DropView(view) => write!(f, "DROP VIEW IF EXISTS {};", view.qualified_name()),
             Self::Comment(text) => write!(f, "-- {text}"),
         }
     }

@@ -2,6 +2,9 @@ mod item_def;
 mod parse;
 mod registry;
 mod valibot;
+// Shared `#[api(validate(...))]` codegen — also used by `table_type` for the
+// orm-owned `Validate` impl.
+pub(crate) mod validate;
 
 use proc_macro2::TokenStream;
 use quote::quote;

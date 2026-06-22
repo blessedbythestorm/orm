@@ -1,4 +1,6 @@
-use super::model::{Column, DatabaseSchema, EnumType, ForeignKey, ReferentialAction, Table};
+use std::collections::BTreeMap;
+
+use super::model::{Column, DatabaseSchema, EnumType, ForeignKey, ReferentialAction, Table, View};
 
 /// Compile-time schema entries submitted by the macros. These mirror the owned
 /// model types but use `&'static str` so they can live in `inventory` statics.
@@ -31,8 +33,29 @@ pub struct ForeignKeyItem {
     pub on_delete: ReferentialAction,
 }
 
+/// A view declared field-by-field: each column names its source `table.column`,
+/// and the JOINs are inferred from the tables' foreign keys at assembly time (the
+/// macro can't see other tables, but the assembled schema can).
+pub struct ViewItem {
+    pub schema: &'static str,
+    pub name: &'static str,
+    pub columns: &'static [ViewColumnItem],
+    pub filter: Option<&'static str>,
+    pub order_by: Option<&'static str>,
+}
+
+pub struct ViewColumnItem {
+    /// Output column / struct field name.
+    pub alias: &'static str,
+    /// Source column's schema, table, and column.
+    pub schema: &'static str,
+    pub table: &'static str,
+    pub column: &'static str,
+}
+
 inventory::collect!(EnumItem);
 inventory::collect!(TableItem);
+inventory::collect!(ViewItem);
 
 /// Drains the registry into the owned schema model defined by the Rust types.
 pub fn assemble_desired_schema() -> DatabaseSchema {
@@ -47,7 +70,96 @@ pub fn assemble_desired_schema() -> DatabaseSchema {
         schema.tables.insert(table.qualified_name(), table);
     }
 
+    // Views are resolved last: building a view's SELECT needs the tables' foreign
+    // keys (for the JOINs), so they must already be in `schema.tables`.
+    for item in inventory::iter::<ViewItem> {
+        let view = build_view(item, &schema.tables);
+        schema.views.insert(view.qualified_name(), view);
+    }
+
     schema
+}
+
+/// Assembles a view's SELECT from its declared columns, inferring the FROM table
+/// (the first column's table) and the JOINs (from foreign keys between tables).
+fn build_view(item: &ViewItem, tables: &BTreeMap<String, Table>) -> View {
+    let base = item.columns.first().unwrap_or_else(|| {
+        panic!("view {}.{} declares no columns", item.schema, item.name)
+    });
+
+    let select = item
+        .columns
+        .iter()
+        .map(|c| format!("{}.{} AS {}", c.table, c.column, c.alias))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // One JOIN per distinct non-base table, in first-seen order.
+    let mut joins = Vec::new();
+    let mut seen = vec![(base.schema, base.table)];
+    for column in item.columns {
+        let key = (column.schema, column.table);
+        if !seen.contains(&key) {
+            seen.push(key);
+            joins.push(resolve_join(item, base, column, tables));
+        }
+    }
+
+    let mut sql = format!("SELECT {select} FROM {}.{}", base.schema, base.table);
+    for join in &joins {
+        sql.push(' ');
+        sql.push_str(join);
+    }
+    if let Some(filter) = item.filter {
+        sql.push_str(&format!(" WHERE {filter}"));
+    }
+    if let Some(order_by) = item.order_by {
+        sql.push_str(&format!(" ORDER BY {order_by}"));
+    }
+
+    View { schema: item.schema.to_string(), name: item.name.to_string(), definition: sql }
+}
+
+/// Builds the `JOIN <other> ON …` clause linking `base` to the `joined` column's
+/// table via whichever foreign key connects them (base→other or other→base).
+fn resolve_join(
+    item: &ViewItem,
+    base: &ViewColumnItem,
+    joined: &ViewColumnItem,
+    tables: &BTreeMap<String, Table>,
+) -> String {
+    let target = format!("{}.{}", joined.schema, joined.table);
+
+    if let Some(base_table) = tables.get(&format!("{}.{}", base.schema, base.table)) {
+        for column in &base_table.columns {
+            if let Some(fk) = &column.foreign_key {
+                if fk.schema == joined.schema && fk.table == joined.table {
+                    return format!(
+                        "JOIN {target} ON {}.{} = {}.{}",
+                        base.table, column.name, joined.table, fk.column
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(joined_table) = tables.get(&target) {
+        for column in &joined_table.columns {
+            if let Some(fk) = &column.foreign_key {
+                if fk.schema == base.schema && fk.table == base.table {
+                    return format!(
+                        "JOIN {target} ON {}.{} = {}.{}",
+                        joined.table, column.name, base.table, fk.column
+                    );
+                }
+            }
+        }
+    }
+
+    panic!(
+        "view {}.{}: no foreign key links {}.{} to {}.{} — declare one to join them",
+        item.schema, item.name, base.schema, base.table, joined.schema, joined.table
+    );
 }
 
 impl From<&EnumItem> for EnumType {

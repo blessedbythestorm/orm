@@ -23,25 +23,23 @@ impl FilterValue for &str {
     }
 }
 
-impl FilterValue for Option<String> {
+/// `Option<T>` filters on the inner value when `Some` and contributes no
+/// predicate when `None`, so optional filters compose without branching. The
+/// blanket delegates to the inner `FilterValue` (preserving e.g. `String`'s
+/// `LIKE` wrapping) and covers macro-generated enum filters, which a user crate
+/// can't wrap in `Option` itself (orphan rules: `Option` is foreign).
+impl<T: FilterValue> FilterValue for Option<T> {
     fn into_filter_value(self, op: FilterOp) -> Option<Arc<dyn ToSql + Send + Sync>> {
-        self.map(|value| Arc::new(op.wrap_value(&value)) as Arc<dyn ToSql + Send + Sync>)
+        self.and_then(|value| value.into_filter_value(op))
     }
 }
 
-/// Values bound as-is (the filter op only matters for text matching), each with
-/// its `Option<_>` companion that yields no filter when `None`.
+/// Values bound as-is (the filter op only matters for text matching).
 macro_rules! impl_direct_filter_value {
     ($($ty:ty),+ $(,)?) => {$(
         impl FilterValue for $ty {
             fn into_filter_value(self, _op: FilterOp) -> Option<Arc<dyn ToSql + Send + Sync>> {
                 Some(Arc::new(self))
-            }
-        }
-
-        impl FilterValue for Option<$ty> {
-            fn into_filter_value(self, _op: FilterOp) -> Option<Arc<dyn ToSql + Send + Sync>> {
-                self.map(|value| Arc::new(value) as Arc<dyn ToSql + Send + Sync>)
             }
         }
     )+};

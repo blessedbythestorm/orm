@@ -245,6 +245,9 @@ fn owned_schemas(schema: &DatabaseSchema) -> Vec<String> {
     for table in schema.tables.values() {
         schemas.insert(table.schema.clone());
     }
+    for view in schema.views.values() {
+        schemas.insert(view.schema.clone());
+    }
     for enum_type in schema.enums.values() {
         if let Some((name, _)) = enum_type.name.split_once('.') {
             schemas.insert(name.to_string());

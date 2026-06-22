@@ -20,7 +20,10 @@ pub mod registry;
 pub mod schema;
 pub mod style;
 pub mod traits;
+pub mod validate;
 
-pub use macros::{api_type, endpoint, enum_type, json_type, table_type};
+pub use macros::{api_type, endpoint, enum_type, json_type, table_type, view_type};
 pub use registry::{TypeExport, export_all_types};
 pub use traits::{FromRow, QueryExt};
+pub use validate::{Valid, Validate, ValidationError, ValidationErrors};
+

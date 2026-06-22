@@ -188,10 +188,17 @@ const REQUEST_HELPER: &str = r#"  const base = (config.baseUrl ?? "").replace(/\
     const res = response.value;
 
     if (!res.ok) {
-      const detail = await res.text().catch(() => "");
+      const body = await res.text().catch(() => "");
+      let parsed: { error?: string; fields?: Record<string, string> } | undefined;
+      try {
+        parsed = body ? JSON.parse(body) : undefined;
+      } catch {
+        parsed = undefined;
+      }
       return err({
         status: res.status,
-        message: `${method} ${path} failed (${res.status})${detail ? `: ${detail}` : ""}`,
+        message: parsed?.error ?? `${method} ${path} failed (${res.status})${body ? `: ${body}` : ""}`,
+        fields: parsed?.fields,
       });
     }
 

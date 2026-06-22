@@ -24,7 +24,6 @@ pub struct FieldDef {
     pub is_unique: bool,
     pub default: Option<String>,
     pub foreign_key: Option<ForeignKeySpec>,
-    pub validate_attrs: Vec<TokenStream>,
 }
 
 pub struct ForeignKeySpec {
@@ -105,7 +104,6 @@ impl FieldDef {
 
         let pg = PgSpec::parse(&field.attrs);
         let crud = CrudSpec::parse(&field.attrs);
-        let validate_attrs = extract_validate_attrs(&field.attrs);
 
         // `#[pg(primary)]` columns are database-generated and immutable, so they
         // are optional on insert and excluded from updates.
@@ -125,7 +123,6 @@ impl FieldDef {
             is_unique: pg.unique,
             default: pg.default,
             foreign_key: pg.foreign,
-            validate_attrs,
         }
     }
 
@@ -331,10 +328,6 @@ fn parse_referential_action(ident: &Ident) -> syn::Result<ReferentialActionToken
         "set_default" => Ok(ReferentialActionToken::SetDefault),
         _ => Err(syn::Error::new(ident.span(), "unknown referential action")),
     }
-}
-
-fn extract_validate_attrs(attrs: &[Attribute]) -> Vec<TokenStream> {
-    attrs.iter().filter(|attr| attr.path().is_ident("validate")).map(|attr| quote! { #attr }).collect()
 }
 
 fn is_option_type(ty: &Type) -> bool {
