@@ -1,9 +1,9 @@
-//! Export backends. [`TypeScript`] is the built-in one; add a language by
-//! implementing [`ExportBackend`](crate::export::ExportBackend) here.
+//! The TypeScript [`ExportBackend`](crate::export::ExportBackend). Other
+//! languages would live in sibling modules under [`crate::lang`].
 
 use crate::export::{ExportBackend, Field, FieldType};
 
-/// Emits TypeScript `export type` declarations — the default backend.
+/// Emits TypeScript `export type` declarations.
 pub struct TypeScript;
 
 impl ExportBackend for TypeScript {
@@ -11,11 +11,13 @@ impl ExportBackend for TypeScript {
         if lines.is_empty() {
             return String::new();
         }
+
         let body = lines
             .iter()
             .map(|line| if line.is_empty() { " *".to_string() } else { format!(" * {line}") })
             .collect::<Vec<_>>()
             .join("\n");
+
         format!("/**\n{body}\n */\n")
     }
 
@@ -42,7 +44,12 @@ impl ExportBackend for TypeScript {
     }
 
     fn enum_decl(&self, name: &str, docs: &str, variants: &[&str]) -> String {
-        let union = variants.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(" | ");
+        let union = variants
+            .iter()
+            .map(|v| format!("\"{v}\""))
+            .collect::<Vec<_>>()
+            .join(" | ");
+
         format!("{docs}export type {name} = {union};")
     }
 

@@ -75,7 +75,10 @@ pub trait ExportBackend {
 
 /// Map of exported type name -> its output file, for resolving references.
 pub fn type_paths() -> BTreeMap<&'static str, &'static str> {
-    inventory::iter::<ExportType>.into_iter().map(|t| (t.name, t.path)).collect()
+    inventory::iter::<ExportType>
+        .into_iter()
+        .map(|t| (t.name, t.path))
+        .collect()
 }
 
 /// Drain the registry and write every type into `out_dir` using `backend`,
@@ -93,25 +96,29 @@ pub fn export_all_types(out_dir: &str, backend: &dyn ExportBackend) -> anyhow::R
         decls.sort_by_key(|t| t.name);
         let local: BTreeSet<&str> = decls.iter().map(|t| t.name).collect();
 
-        // Cross-file references, grouped by the module to import them from.
         let mut imports: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
         for t in &decls {
             for dep in dependencies(&t.shape) {
                 if local.contains(dep) {
                     continue;
                 }
-                if let Some(dep_path) = path_of.get(dep) {
-                    imports.entry(relative_import(path, dep_path)).or_default().insert(dep);
-                }
+                let Some(dep_path) = path_of.get(dep) else { continue };
+
+                imports
+                    .entry(relative_import(path, dep_path))
+                    .or_default()
+                    .insert(dep);
             }
         }
 
         let mut out = format!("{}\n", backend.header());
         for (module, names) in &imports {
-            out.push_str(&backend.import(module, &names.iter().copied().collect::<Vec<_>>()));
+            let names: Vec<&str> = names.iter().copied().collect();
+            out.push_str(&backend.import(module, &names));
             out.push('\n');
         }
         out.push('\n');
+
         let bodies: Vec<String> = decls.iter().map(|t| render(backend, t)).collect();
         out.push_str(&bodies.join("\n\n"));
         out.push('\n');
@@ -161,7 +168,12 @@ pub fn relative_import(from_file: &str, to_file: &str) -> String {
     let to: Vec<&str> = strip_ext(to_file).split('/').collect();
     let from_dir = &from[..from.len() - 1];
 
-    let common = from_dir.iter().zip(&to[..to.len() - 1]).take_while(|(a, b)| a == b).count();
+    let common = from_dir
+        .iter()
+        .zip(&to[..to.len() - 1])
+        .take_while(|(a, b)| a == b)
+        .count();
+
     let mut parts: Vec<String> = match from_dir.len() - common {
         0 => vec![".".into()],
         ups => std::iter::repeat_n("..".to_string(), ups).collect(),

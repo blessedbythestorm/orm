@@ -12,10 +12,9 @@
 // external consumers and for orm's own types defined in this crate.
 extern crate self as orm;
 
-pub mod backend;
 pub mod cli;
-pub mod client;
 pub mod export;
+pub mod lang;
 pub mod migrate;
 pub mod query;
 pub mod registry;
@@ -23,6 +22,7 @@ pub mod schema;
 pub mod style;
 pub mod traits;
 pub mod validate;
+pub mod validator;
 
 pub use export::{ExportBackend, ExportType, export_all_types};
 pub use macros::{api_type, endpoint, enum_type, json_type, table_type, view_type};
