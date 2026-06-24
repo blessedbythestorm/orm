@@ -2,7 +2,6 @@ mod crud;
 mod from_row;
 mod insert;
 mod parse;
-mod registry;
 mod schema;
 mod struct_def;
 mod update;
@@ -29,7 +28,6 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let insert = insert::generate(&table);
     let update = update::generate(&table);
     let crud = crud::generate(&table);
-    let registry = registry::generate(&table);
     let schema = schema::generate(&table);
 
     quote! {
@@ -38,7 +36,6 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #insert
         #update
         #crud
-        #registry
         #schema
     }
 }

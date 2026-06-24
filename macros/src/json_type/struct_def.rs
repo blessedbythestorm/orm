@@ -13,10 +13,14 @@ pub fn generate(def: &JsonDef, input: &ItemStruct) -> TokenStream {
 
     let fields = &input.fields;
 
+    let doc = crate::export::doc_lines(&input.attrs);
+    let ts_export = crate::export::struct_export(&name.to_string(), export_to, &doc, &crate::export::fields_from(fields));
+
     quote! {
-        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
-        #[ts(export, export_to = #export_to)]
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
         #(#user_attrs)*
         #vis struct #name #fields
+
+        #ts_export
     }
 }

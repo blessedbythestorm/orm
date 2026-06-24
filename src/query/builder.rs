@@ -9,8 +9,6 @@ pub trait FilterValue {
     fn into_filter_value(self, op: FilterOp) -> Option<Arc<dyn ToSql + Send + Sync>>;
 }
 
-// Text values run through `FilterOp::wrap_value` so `LIKE`/`ILIKE` get their
-// `%…%` wrapping; everything else binds verbatim.
 impl FilterValue for String {
     fn into_filter_value(self, op: FilterOp) -> Option<Arc<dyn ToSql + Send + Sync>> {
         Some(Arc::new(op.wrap_value(&self)))
@@ -23,11 +21,6 @@ impl FilterValue for &str {
     }
 }
 
-/// `Option<T>` filters on the inner value when `Some` and contributes no
-/// predicate when `None`, so optional filters compose without branching. The
-/// blanket delegates to the inner `FilterValue` (preserving e.g. `String`'s
-/// `LIKE` wrapping) and covers macro-generated enum filters, which a user crate
-/// can't wrap in `Option` itself (orphan rules: `Option` is foreign).
 impl<T: FilterValue> FilterValue for Option<T> {
     fn into_filter_value(self, op: FilterOp) -> Option<Arc<dyn ToSql + Send + Sync>> {
         self.and_then(|value| value.into_filter_value(op))

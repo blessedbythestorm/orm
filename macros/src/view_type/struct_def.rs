@@ -5,7 +5,7 @@ use syn::ItemStruct;
 use super::parse::ViewDef;
 
 /// Re-emits the projection struct with the derives a read-model needs: row
-/// deserialization (`FromRow` is generated separately), serde, and ts-rs. No
+/// deserialization (`FromRow` is generated separately), serde, and TypeScript export. No
 /// `Validate` — a view is query output, never validated input.
 pub fn generate(view: &ViewDef, input: &ItemStruct) -> TokenStream {
     let vis = &input.vis;
@@ -26,12 +26,16 @@ pub fn generate(view: &ViewDef, input: &ItemStruct) -> TokenStream {
         })
         .collect();
 
+    let doc = crate::export::doc_lines(&input.attrs);
+    let ts_export = crate::export::struct_export(&name.to_string(), export_path, &doc, &crate::export::fields_from(&input.fields));
+
     quote! {
-        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
-        #[ts(export, export_to = #export_path, optional_fields)]
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
         #(#user_attrs)*
         #vis struct #name {
             #(#fields),*
         }
+
+        #ts_export
     }
 }

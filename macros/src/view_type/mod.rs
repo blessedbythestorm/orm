@@ -1,7 +1,6 @@
 mod crud;
 mod from_row;
 mod parse;
-mod registry;
 mod schema;
 mod struct_def;
 
@@ -25,14 +24,12 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let struct_def = struct_def::generate(&view, &input);
     let from_row = from_row::generate(&view);
     let crud = crud::generate(&view);
-    let registry = registry::generate(&view);
     let schema = schema::generate(&view);
 
     quote! {
         #struct_def
         #from_row
         #crud
-        #registry
         #schema
     }
 }

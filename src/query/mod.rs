@@ -37,7 +37,6 @@ impl SortOrder {
 #[api_type(export_to = "api/query.ts")]
 pub struct Search {
     pub query: Option<String>,
-    /// Comma-separated list of columns to search, e.g. `?fields=name,email`.
     pub fields: Option<String>,
 }
 

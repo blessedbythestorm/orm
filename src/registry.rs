@@ -1,35 +1,17 @@
 use std::path::PathBuf;
 
 use tracing::info;
-use ts_rs::ExportError;
 
-pub struct TypeExport {
-    pub name: &'static str,
-    pub export_all: fn() -> Result<(), ExportError>,
-}
+use crate::export::FieldType;
 
-inventory::collect!(TypeExport);
-
-pub fn export_all_types() -> anyhow::Result<()> {
-    for export in inventory::iter::<TypeExport> {
-        (export.export_all)().map_err(|e| anyhow::anyhow!("Failed to export {}: {}", export.name, e))?;
-        info!("Exported {}", export.name);
-    }
-
-    Ok(())
-}
-
-/// A request/response/query type referenced by an endpoint, resolved through
-/// `ts-rs` so the client generator can emit the right TypeScript name and the
-/// import path of the file ts-rs exported it to.
+/// A request/response/query type referenced by an endpoint, in the neutral
+/// model. The client generator renders it (and resolves imports) via a backend.
 pub struct TypeRef {
-    pub ts_name: fn() -> String,
-    pub ts_output_path: fn() -> Option<PathBuf>,
+    pub ty: &'static FieldType,
 }
 
 /// One HTTP endpoint, registered by `#[endpoint(METHOD, "/path")]`. Drained by
-/// the client generator (see [`crate::client`]) to emit a typed TS client — the
-/// twin of `export_all_types` for endpoints instead of types.
+/// the client generator (see [`crate::client`]) to emit a typed TS client.
 pub struct EndpointMeta {
     pub method: &'static str,
     pub path: &'static str,
@@ -43,8 +25,7 @@ inventory::collect!(EndpointMeta);
 
 /// A valibot schema for an `#[api_type]`, derived from the struct's field types
 /// and `#[validate(...)]` rules. `build` runs at export time (not macro time) so
-/// `regex` rules can read the actual pattern from the compiled `Regex` via
-/// `as_str()` — something only available at runtime.
+/// `regex` rules can read the actual pattern from the compiled `Regex`.
 pub struct ValibotSchema {
     pub name: &'static str,
     pub build: fn() -> String,
@@ -52,8 +33,7 @@ pub struct ValibotSchema {
 
 inventory::collect!(ValibotSchema);
 
-/// Write `<out_dir>/schemas.ts` — runtime valibot validators for the api types,
-/// the companion to the ts-rs type files.
+/// Write `<out_dir>/schemas.ts` — runtime valibot validators for the api types.
 pub fn export_valibot_schemas(out_dir: &str) -> anyhow::Result<()> {
     let mut schemas: Vec<&ValibotSchema> = inventory::iter::<ValibotSchema>.into_iter().collect();
     if schemas.is_empty() {

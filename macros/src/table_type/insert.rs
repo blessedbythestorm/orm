@@ -8,9 +8,16 @@ pub fn generate(table: &TableDef) -> TokenStream {
     let export_path = table.export_path();
     let fields = generate_fields(table);
 
+    let ts_fields: Vec<crate::export::Field> = table
+        .insert_fields()
+        .map(|f| crate::export::Field { name: f.name_str.clone(), ty: f.ty.clone(), forced_optional: f.is_auto_generated })
+        .collect();
+    let ts_export = crate::export::struct_export(&name.to_string(), export_path, &[], &ts_fields);
+
     quote! {
-        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
-        #[ts(export, export_to = #export_path, optional_fields)]
+        #ts_export
+
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
         pub struct #name {
             #(#fields),*
         }
@@ -34,7 +41,6 @@ fn generate_fields(table: &TableDef) -> Vec<TokenStream> {
             if f.is_auto_generated {
                 let ty = f.as_option_type();
                 quote! {
-                    #[ts(optional)]
                     pub #name: #ty
                 }
             } else {

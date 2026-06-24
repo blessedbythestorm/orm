@@ -24,14 +24,22 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
 
     let validate_impl = crate::api_type::validate::generate(name, &input.generics, &input.fields);
 
+    let doc = crate::export::doc_lines(&input.attrs);
+    let ts_fields: Vec<crate::export::Field> = table
+        .fields
+        .iter()
+        .map(|f| crate::export::Field { name: f.name_str.clone(), ty: f.ty.clone(), forced_optional: false })
+        .collect();
+    let ts_export = crate::export::struct_export(&name.to_string(), export_path, &doc, &ts_fields);
+
     quote! {
-        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
-        #[ts(export, export_to = #export_path, optional_fields)]
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
         #(#user_attrs)*
         #vis struct #name {
             #(#fields),*
         }
 
         #validate_impl
+        #ts_export
     }
 }

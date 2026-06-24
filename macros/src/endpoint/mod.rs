@@ -84,12 +84,10 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn type_ref(ty: Option<&Type>) -> TokenStream {
     match ty {
-        Some(ty) => quote! {
-            ::core::option::Option::Some(::orm::registry::TypeRef {
-                ts_name: || <#ty as ts_rs::TS>::name(),
-                ts_output_path: || <#ty as ts_rs::TS>::output_path(),
-            })
-        },
+        Some(ty) => {
+            let (field_ty, _) = crate::export::field_type(ty);
+            quote! { ::core::option::Option::Some(::orm::registry::TypeRef { ty: #field_ty }) }
+        }
         None => quote! { ::core::option::Option::None },
     }
 }

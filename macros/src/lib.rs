@@ -3,6 +3,7 @@ mod endpoint;
 mod enum_type;
 mod json_type;
 mod table_type;
+mod export;
 mod view_type;
 
 use proc_macro::TokenStream;

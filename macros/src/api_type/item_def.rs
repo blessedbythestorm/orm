@@ -32,13 +32,16 @@ fn generate_struct(input: &syn::ItemStruct, export_to: &str) -> TokenStream {
     }
     let fields = &output.fields;
 
+    let doc = crate::export::doc_lines(&input.attrs);
+    let ts_export = crate::export::struct_export(&name.to_string(), export_to, &doc, &crate::export::fields_from(fields));
+
     quote! {
-        #[derive(Debug, serde::Deserialize, serde::Serialize, ts_rs::TS)]
-        #[ts(export, export_to = #export_to, optional_fields)]
+        #[derive(Debug, serde::Deserialize, serde::Serialize)]
         #(#user_attrs)*
         #vis struct #name #generics #fields
 
         #validate_impl
+        #ts_export
     }
 }
 
@@ -50,12 +53,17 @@ fn generate_enum(input: &syn::ItemEnum, export_to: &str) -> TokenStream {
 
     let user_attrs: Vec<_> = input.attrs.iter().filter(|a| !a.path().is_ident("api_type")).collect();
 
+    let doc = crate::export::doc_lines(&input.attrs);
+    let variant_names: Vec<String> = variants.iter().map(|v| v.ident.to_string()).collect();
+    let ts_export = crate::export::enum_export(&name.to_string(), export_to, &doc, &variant_names);
+
     quote! {
-        #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, ts_rs::TS)]
-        #[ts(export, export_to = #export_to)]
+        #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
         #(#user_attrs)*
         #vis enum #name #generics {
             #variants
         }
+
+        #ts_export
     }
 }

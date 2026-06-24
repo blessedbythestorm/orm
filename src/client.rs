@@ -15,7 +15,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::backend::TypeScript;
+use crate::export::{ExportBackend, FieldType};
 use crate::registry::{EndpointMeta, ValibotSchema};
+
+/// The referenced type's name, if it's a named export (vs a builtin like `Json`).
+fn named(ty: &FieldType) -> Option<&'static str> {
+    match ty {
+        FieldType::Named(name) => Some(*name),
+        _ => None,
+    }
+}
 
 /// A node in the client object tree: nested `groups` and leaf `methods`
 /// (method name -> the rendered arrow function, which may span several lines).
@@ -63,7 +73,7 @@ impl Group {
 }
 
 /// Write `<out_dir>/client.ts` from the registered endpoints. `types_prefix` is
-/// the import prefix for the ts-rs type modules (e.g. `"."` when co-located, or
+/// the import prefix for the TypeScript type modules (e.g. `"."` when co-located, or
 /// `"$lib/types"` when the types live in a sibling directory).
 pub fn generate_client(out_dir: &str, types_prefix: &str) -> anyhow::Result<()> {
     let mut endpoints: Vec<&EndpointMeta> = inventory::iter::<EndpointMeta>.into_iter().collect();
@@ -77,10 +87,13 @@ pub fn generate_client(out_dir: &str, types_prefix: &str) -> anyhow::Result<()> 
     let mut root = Group::default();
     let mut needs_query = false;
 
+    let paths = crate::export::type_paths();
     for endpoint in &endpoints {
         for type_ref in [&endpoint.request, &endpoint.query, &endpoint.response].into_iter().flatten() {
-            if let Some(path) = (type_ref.ts_output_path)() {
-                imports.entry(module_specifier(&path, types_prefix)).or_default().insert((type_ref.ts_name)());
+            if let Some(name) = named(type_ref.ty) {
+                if let Some(path) = paths.get(name) {
+                    imports.entry(module_specifier(path, types_prefix)).or_default().insert(name.to_string());
+                }
             }
         }
         if endpoint.query.is_some() {
@@ -88,10 +101,10 @@ pub fn generate_client(out_dir: &str, types_prefix: &str) -> anyhow::Result<()> 
         }
 
         // If the request type has a valibot schema, validate the body before sending.
-        let validated = endpoint.request.as_ref().and_then(|r| {
-            let name = (r.ts_name)();
-            schema_names.contains(&name).then(|| format!("{name}Schema"))
-        });
+        let validated = endpoint
+            .request
+            .as_ref()
+            .and_then(|r| named(r.ty).filter(|n| schema_names.contains(*n)).map(|n| format!("{n}Schema")));
         if let Some(schema) = &validated {
             schema_imports.insert(schema.clone());
         }
@@ -266,14 +279,15 @@ const QUERY_HELPER: &str = r#"
 fn render_method(endpoint: &EndpointMeta, validated: Option<&str>) -> String {
     let mut args: Vec<String> = path_params(endpoint.path).iter().map(|p| format!("{p}: string")).collect();
     if let Some(request) = &endpoint.request {
-        args.push(format!("body: {}", (request.ts_name)()));
+        args.push(format!("body: {}", TypeScript.type_expr(request.ty)));
     }
     if let Some(query) = &endpoint.query {
-        args.push(format!("query: {}", (query.ts_name)()));
+        args.push(format!("query: {}", TypeScript.type_expr(query.ty)));
     }
     let args = args.join(", ");
 
-    let returns = endpoint.response.as_ref().map(|r| (r.ts_name)()).unwrap_or_else(|| "void".into());
+    let returns =
+        endpoint.response.as_ref().map(|r| TypeScript.type_expr(r.ty)).unwrap_or_else(|| "void".to_string());
     let url = format!(
         "`{}`{}",
         endpoint.path.replace('{', "${"),
@@ -295,8 +309,8 @@ fn render_method(endpoint: &EndpointMeta, validated: Option<&str>) -> String {
 }
 
 /// `api/live.ts` -> `<prefix>/api/live` (e.g. `./api/live` or `$lib/types/api/live`).
-fn module_specifier(path: &Path, prefix: &str) -> String {
-    format!("{}/{}", prefix, path.with_extension("").to_string_lossy().replace('\\', "/"))
+fn module_specifier(path: &str, prefix: &str) -> String {
+    format!("{}/{}", prefix, path.trim_end_matches(".ts"))
 }
 
 /// Names of `{param}` segments in a route path, in order.

@@ -1,5 +1,5 @@
 //! Generic orm CLI entrypoint. Drains the inventory of registered types
-//! and writes ts-rs bindings to disk.
+//! and writes TypeScript bindings to disk.
 //!
 //! Each consumer workspace adds a tiny `[[bin]]` target that calls
 //! `orm::cli::main(default_out)`. The bin must transitively link every crate
@@ -18,7 +18,6 @@
 //! cargo run --bin export-types -- export --out ../common/types   # override
 //! ```
 
-use std::env;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -33,9 +32,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Export ts-rs bindings for every registered type.
+    /// Export TypeScript bindings for every registered type.
     Export {
-        /// ts-rs output directory (sets TS_RS_EXPORT_DIR). Defaults to the value
+        /// TypeScript output directory. Defaults to the value
         /// the caller passed to `main`, so a bare `export` Just Works.
         #[arg(long, short)]
         out: Option<String>,
@@ -48,7 +47,7 @@ enum Command {
         /// Output directory for client.ts. Defaults to the value passed to `main`.
         #[arg(long, short)]
         out: Option<String>,
-        /// Import prefix for the ts-rs type modules (e.g. `$lib/types`). Defaults
+        /// Import prefix for the TypeScript type modules (e.g. `$lib/types`). Defaults
         /// to `.` (types co-located next to client.ts).
         #[arg(long)]
         types_import: Option<String>,
@@ -63,10 +62,7 @@ impl Command {
         match self {
             Command::Export { out, schemas_out } => {
                 let out = out.unwrap_or_else(|| default_out.to_string());
-                // SAFETY: process is single-threaded at this point (CLI startup),
-                // so racing on env vars is impossible.
-                unsafe { env::set_var("TS_RS_EXPORT_DIR", &out) };
-                crate::registry::export_all_types()?;
+                crate::export::export_all_types(&out, &crate::backend::TypeScript)?;
                 crate::registry::export_valibot_schemas(&schemas_out.unwrap_or(out))
             }
             Command::GenClient { out, types_import } => {

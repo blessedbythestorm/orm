@@ -1,6 +1,5 @@
 mod item_def;
 mod parse;
-mod registry;
 mod valibot;
 // Shared `#[api(validate(...))]` codegen — also used by `table_type` for the
 // orm-owned `Validate` impl.
@@ -31,12 +30,10 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let def = ApiDef::parse(&input);
 
     let item_def = item_def::generate(&def, &input);
-    let registry = registry::generate(&def);
     let valibot = valibot::generate(&input);
 
     quote! {
         #item_def
-        #registry
         #valibot
     }
 }

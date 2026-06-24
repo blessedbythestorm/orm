@@ -1,6 +1,5 @@
 mod parse;
 mod postgres;
-mod registry;
 mod schema;
 mod struct_def;
 
@@ -23,13 +22,11 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let struct_def = struct_def::generate(&def, &input);
     let postgres = postgres::generate(&def);
-    let registry = registry::generate(&def);
     let schema = schema::generate(&def);
 
     quote! {
         #struct_def
         #postgres
-        #registry
         #schema
     }
 }
