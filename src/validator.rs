@@ -69,8 +69,11 @@ pub fn export_validators(out_dir: &str, backend: &dyn ValidatorBackend) -> anyho
         out.push('\n');
     }
 
-    std::fs::create_dir_all(out_dir)?;
-    std::fs::write(Path::new(out_dir).join(backend.file_name()), out)?;
+    let file = Path::new(out_dir).join(backend.file_name());
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(file, out)?;
 
     info!("Exported {} validator schema(s)", schemas.len());
     Ok(())

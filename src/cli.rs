@@ -53,7 +53,8 @@ fn generate(lang: &str, out: &str) -> anyhow::Result<()> {
         "ts" | "typescript" => {
             crate::export::export_all_types(out, &crate::lang::ts::TypeScript)?;
             crate::validator::export_validators(out, &crate::lang::ts::Valibot)?;
-            crate::lang::ts::generate_client(out, ".")?;
+            crate::lang::ts::generate_client(out, "$lib")?;
+            crate::lang::ts::generate_result(out)?;
         }
         other => anyhow::bail!("unsupported language: {other} (supported: ts)"),
     }
