@@ -4,7 +4,7 @@ pub use builder::*;
 
 use crate::api_type;
 
-#[api_type(export_to = "api/query.ts")]
+#[api_type(export_to = "types/api/query.ts")]
 pub struct Pagination {
     #[api(validate(range(min(1), max(100))))]
     pub limit: u32,
@@ -12,13 +12,13 @@ pub struct Pagination {
     pub offset: u32,
 }
 
-#[api_type(export_to = "api/query.ts")]
+#[api_type(export_to = "types/api/query.ts")]
 pub struct Sort {
     pub sort_by: Option<String>,
     pub sort_order: Option<SortOrder>,
 }
 
-#[api_type(export_to = "api/query.ts")]
+#[api_type(export_to = "types/api/query.ts")]
 pub enum SortOrder {
     #[default]
     Asc,
@@ -34,7 +34,7 @@ impl SortOrder {
     }
 }
 
-#[api_type(export_to = "api/query.ts")]
+#[api_type(export_to = "types/api/query.ts")]
 pub struct Search {
     pub query: Option<String>,
     pub fields: Option<String>,

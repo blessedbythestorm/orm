@@ -5,7 +5,7 @@ pub struct Valibot;
 
 impl ValidatorBackend for Valibot {
     fn file_name(&self) -> &str {
-        "schemas.ts"
+        "schema/schemas.ts"
     }
 
     fn header(&self) -> String {
