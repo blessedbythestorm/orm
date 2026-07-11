@@ -1,24 +1,25 @@
 # orm
 
-`orm` is a convention-driven PostgreSQL toolkit for Rust. Rust structs and enums
-are the source of truth for database schema, row decoding, CRUD inputs, API
-validation, and generated TypeScript bindings.
+`orm` is a PostgreSQL ORM and schema/code-generation toolkit for Rust. It
+generates row decoding, CRUD code, PostgreSQL conversions, API validation,
+TypeScript types, HTTP client metadata, and migrations from Rust definitions.
 
-The crate is built on `tokio-postgres` and `deadpool-postgres`. It does not hide
-SQL: generated queries and migration SQL are ordinary SQL strings that can be
-reviewed, tested, and supplemented with handwritten queries.
+It uses `tokio-postgres` and `deadpool-postgres`. SQL remains visible: generated
+queries and migration files are ordinary SQL and can be reviewed or replaced
+with handwritten queries.
 
-## Install and wire up a new Axum project
+## Install and create an Axum project
 
-`orm` is currently consumed from Git. The derive macros are re-exported by
-`orm`; do not depend on the private `macros` crate directly.
+`orm` is currently consumed from Git. Use `orm` only; the `macros` crate is an
+implementation detail re-exported by it.
 
 ```toml
 [dependencies]
 orm = { git = "https://github.com/blessedbythestorm/orm.git", branch = "main" }
 
-# Crates referenced by the generated code. Keep these as direct dependencies.
+# Direct dependencies used by macro expansions and the server.
 anyhow = "1"
+axum = "0.8"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 deadpool-postgres = "0.14"
@@ -33,56 +34,39 @@ tokio-postgres = { version = "0.7", features = [
   "with-uuid-1",
 ] }
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
-
-# Needed by the API examples, not by the database-only parts.
-axum = "0.8"
 ```
 
-The generated implementations refer to dependencies such as `serde`,
-`tokio_postgres`, `deadpool_postgres`, and `inventory` by their normal crate
-names. That is why the crates used by your selected macros must be direct
-dependencies of the consuming package.
+The generated code refers to crates such as `serde`, `inventory`,
+`tokio_postgres`, and `deadpool_postgres` by name. Keep the crates used by your
+macros as direct dependencies.
 
-### Create the application shell
-
-Start with an ordinary Axum application. The library target keeps the model
-definitions available to both the HTTP server and the ORM CLI; replace
-`account_api` below with your package's Rust crate name.
+Create the project and add a library target:
 
 ```sh
 cargo new account-api
 cd account-api
 ```
 
-This project has two separate binaries:
-
-- `src/main.rs` is the server binary. It builds the PostgreSQL pool, starts the
-  Axum router, and serves HTTP requests. Run it with `cargo run`.
-- `src/bin/orm-cli.rs` is the ORM CLI binary. It runs schema migrations and
-  TypeScript generation. Run it with `cargo run --bin orm-cli -- ...`.
-
-They are separate entrypoints because `orm::cli::main` parses CLI arguments
-and exits; it should not replace the Axum server's `main`. Both binaries link
-the library target, so both can see the same macro registrations through
-`inventory`. Adding `src/lib.rs` does not remove the server binary created by
-`cargo new`—it gives the package shared code that both binaries can import.
-
-Use this layout:
-
 ```text
 src/
 ├── bin/
-│   └── orm-cli.rs  # ORM CLI binary
-├── lib.rs          # shared models and ORM declarations
+│   └── orm-cli.rs  # migration and code-generation binary
+├── lib.rs          # shared models and macro declarations
 └── main.rs         # Axum server binary
 ```
 
-Put the model definitions from the next section in `src/lib.rs`. A minimal
-`src/main.rs` can create one PostgreSQL pool, put it in Axum state, and call the
-generated CRUD trait from a handler:
+There are two binaries. `src/main.rs` is the server and runs with `cargo run`.
+`src/bin/orm-cli.rs` runs migrations and TypeScript generation with
+`cargo run --bin orm-cli -- ...`. Keep them separate: `orm::cli::main` parses
+CLI arguments and exits; it is not the Axum server entrypoint. Both binaries
+must link `lib.rs` so `inventory` can see the same model and endpoint metadata.
+
+Put the macro declarations from the next section in `src/lib.rs`. The server
+can then share the generated `AccountCrud` implementation through Axum state:
 
 ```rust
-use account_api::{Account, AccountCrud};
+// src/main.rs
+use account_api::{Account, AccountCrud}; // replace with your package name
 use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use deadpool_postgres::{Config, Runtime};
 use orm::query::QueryOptions;
@@ -117,68 +101,49 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-`State<Pool>` is the binding point between Axum and `orm`: the generated CRUD
-implementation is for `deadpool_postgres::Pool`, and each call checks out a
-client from that pool. Do not create a new PostgreSQL connection inside every
-handler. For a handwritten query, check out a client from the same state and
-use `orm::QueryExt` on it.
+`State<Pool>` is the Axum/ORM binding. Generated CRUD methods acquire a client
+from the pool; handlers should not open a new PostgreSQL connection per request.
 
-The CLI binary must link the library containing the macro declarations so
-`inventory` can see their schema and endpoint metadata:
+The CLI binary must import the library crate so its inventory submissions are
+linked:
 
 ```rust
 // src/bin/orm-cli.rs
-use account_api as _; // intentionally keeps the model crate linked
+use account_api as _; // replace with your package name
 
 fn main() -> std::process::ExitCode {
     orm::cli::main(concat!(env!("CARGO_MANIFEST_DIR"), "/generated"))
 }
 ```
 
-After adding the model code, create and apply its schema before starting the
-server:
+After adding the models, create the schema before starting the server:
 
 ```sh
 export DATABASE_URL=postgres://localhost/account_api
-
 cargo run --bin orm-cli -- migrate generate create_accounts
 cargo run --bin orm-cli -- migrate apply
 cargo run
-
-# In another terminal:
-curl http://127.0.0.1:3000/accounts
 ```
 
-The same pool can be used with `Valid<Json<T>>` or `Valid<Query<T>>` in an API
-handler; the validation and route metadata example appears below.
+## Macros
 
-## Define the domain types
+All macros below are re-exported from `orm` and are attribute macros.
 
-The following `src/lib.rs` example is a small domain model.
-`#[enum_type]`, `#[json_type]`, and `#[table_type]` register the schema and
-generate the serialization, PostgreSQL, TypeScript, and CRUD code needed by the
-example.
+| Macro | Represents | Main generated code |
+| --- | --- | --- |
+| `table_type` | A PostgreSQL table | Rust row type, insert/update types, CRUD, schema metadata |
+| `enum_type` | A PostgreSQL enum | Serde/Postgres conversions, filters, TypeScript union, schema metadata |
+| `json_type` | A typed `json`/`jsonb` value | Serde/Postgres conversions, TypeScript type, schema metadata |
+| `view_type` | A read-only PostgreSQL view | Row type, view query trait, TypeScript type, schema metadata |
+| `api_type` | An HTTP request/response type | Serde, validation, TypeScript type, validator schema |
+| `endpoint` | HTTP route metadata | Request/query/response metadata for the generated client |
+
+### `#[table_type]`: PostgreSQL tables
+
+Use it on a named-field struct to represent a physical PostgreSQL table:
 
 ```rust
-use chrono::{DateTime, Utc};
-use orm::{enum_type, json_type, table_type};
 use uuid::Uuid;
-
-#[enum_type(
-    schema = "public",
-    name = "account_status",
-    export_to = "types/database/accounts.ts"
-)]
-pub enum AccountStatus {
-    Active,
-    Suspended,
-}
-
-#[json_type(export_to = "types/database/accounts.ts")]
-pub struct AccountProfile {
-    pub display_name: String,
-    pub avatar_url: Option<String>,
-}
 
 #[table_type(
     schema = "public",
@@ -186,223 +151,113 @@ pub struct AccountProfile {
     export_to = "types/database/accounts.ts"
 )]
 pub struct Account {
-    // `create_account` omits primary-key columns, so the database must generate it.
     #[pg(primary, default(sql("gen_random_uuid()")))]
     #[crud(insert(skip))]
     pub id: Uuid,
-    pub email: String,
-    pub status: AccountStatus,
-    pub profile: AccountProfile,
-    // This column is also generated by PostgreSQL and is not an insert/update field.
-    #[pg(default(sql("now()")))]
-    #[crud(insert(skip), update(skip))]
-    pub created_at: DateTime<Utc>,
-}
-```
-
-From this one table definition, the macro generates `AccountInsert`,
-`AccountUpdate`, `AccountCrud`, a `FromRow` implementation, a `Validate`
-implementation, and a TypeScript type export. `AccountCrud` is implemented for
-`deadpool_postgres::Pool` and provides `get_accounts`, `get_account`,
-`create_account`, `update_account`, and `delete_account`.
-
-The generated table CRUD follows a deliberate convention: the table must have
-an `id: uuid::Uuid` column. The generated `get_*`, `update_*`, and `delete_*`
-methods use `WHERE id = $1`. For a different key shape, use the lower-level
-`FromRow` and `QueryExt` APIs or write a repository by hand.
-
-The `gen_random_uuid()` and `now()` expressions above must be available in the
-target PostgreSQL database. `default(sql(...))` is copied into migration SQL;
-it does not execute or validate the expression during compilation.
-
-## Tables, schema metadata, and CRUD
-
-`#[table_type]` requires `schema`, `name`, and `export_to`. Field attributes
-describe the PostgreSQL schema and the generated input types:
-
-```rust
-#[table_type(
-    schema = "public",
-    name = "projects",
-    export_to = "types/database/projects.ts"
-)]
-pub struct Project {
-    #[pg(primary, default(sql("gen_random_uuid()")))]
-    #[crud(insert(skip))]
-    pub id: uuid::Uuid,
-
     #[pg(unique)]
-    pub slug: String,
-
-    #[pg(foreign(public.accounts.id, on_delete(cascade)))]
-    pub account_id: uuid::Uuid,
-
-    #[crud(insert(skip), update(skip))]
-    #[pg(default(sql("now()")))]
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub email: String,
 }
 ```
 
-Supported PostgreSQL scalar mappings include `bool`, `i16`, `i32`, `i64`,
-`f32`, `f64`, `String`, `Vec<u8>`, `uuid::Uuid`, `chrono::NaiveDate`,
-`chrono::NaiveDateTime`, `chrono::DateTime<chrono::Utc>`, and
-`serde_json::Value`. `Option<T>` makes the column nullable. `#[enum_type]`
-and `#[json_type]` add the corresponding mappings for custom PostgreSQL enum
-and JSONB types.
+`schema`, `name`, and `export_to` are required. The macro generates:
 
-The field controls have these effects:
+- `AccountInsert`, `AccountUpdate`, and `AccountCrud`;
+- `orm::FromRow`, Serde, and `orm::Validate` implementations;
+- TypeScript export metadata and migration schema metadata;
+- `get_accounts`, `get_account`, `create_account`, `update_account`, and
+  `delete_account` on `deadpool_postgres::Pool`.
 
-- `#[pg(primary)]` marks a primary-key column. Under the generated CRUD
-  convention it is treated as database-generated and omitted from create and
-  update SQL, so give it a database default. Add `#[crud(insert(skip))]` when
-  the primary key should also be omitted from the generated `NameInsert`
-  struct.
-- `#[pg(unique)]` adds a `UNIQUE` constraint to generated schema SQL.
-- `#[pg(default(...))]` accepts a literal such as `default("active")` or raw
-  SQL such as `default(sql("now()"))`.
-- `#[pg(foreign(schema.table.column, on_update(...), on_delete(...)))]` adds a
-  foreign key and its referential actions.
-- `#[crud(insert(optional))]` makes a generated insert field an `Option<T>`.
-- `#[crud(insert(skip))]` removes a field from the generated insert type and
-  generated create/update field lists; use it for a database-generated value.
-- `#[crud(update(skip))]` removes a field from generated updates.
+Generated CRUD assumes an `id: uuid::Uuid` column and uses `WHERE id = $1`.
+For another key shape, use `FromRow`/`QueryExt` or write a repository manually.
+The database must provide defaults for generated columns such as the primary
+key and `created_at`.
 
-All table fields must implement both `tokio-postgres` row/value conversion and
-`orm::schema::SqlType`. The built-in mappings and the custom-type macros cover
-the common cases; implement those traits yourself for a custom database type.
-
-## Typed rows and query options
-
-`FromRow` is generated for tables and views. `QueryExt` adds typed versions of
-`query`, `query_one`, and `query_opt` to both a `tokio_postgres::Client` and a
-`deadpool_postgres` client:
+Useful field attributes are:
 
 ```rust
-use orm::QueryExt;
-
-let client = pool.get().await?;
-let account: Option<Account> = client
-    .query_opt_typed(
-        "SELECT id, email, status, profile, created_at
-         FROM public.accounts WHERE id = $1",
-        &[&account_id],
-    )
-    .await?;
+#[pg(unique)]
+#[pg(default("active"))]                         // literal default
+#[pg(default(sql("now()")))]                     // raw SQL default
+#[pg(foreign(public.users.id, on_delete(cascade)))]
+#[crud(insert(optional))]
+#[crud(insert(skip), update(skip))]
 ```
 
-The selected column names must match the Rust field names because the generated
-`FromRow` implementation uses `row.try_get("field_name")`.
+`Option<T>` maps to a nullable column. Built-in `SqlType` mappings include
+`bool`, integer/float types, `String`, `Vec<u8>`, `uuid::Uuid`, common `chrono`
+types, and `serde_json::Value`. Custom enum and JSON types are covered below.
 
-`QueryOptions` builds a parameterized `WHERE` clause and a sort/limit/offset
-suffix for generated CRUD and views:
+### `#[enum_type]`: PostgreSQL enums
 
-```rust
-use orm::query::{FilterGroup, FilterOp, QueryOptions, QuerySort, SortOrder};
-
-let options = QueryOptions::new()
-    .filter_group(
-        FilterGroup::or()
-            .filter("email", FilterOp::ILike, "example")
-            .filter("status", FilterOp::Eq, AccountStatus::Suspended),
-    )
-    .filter("email", FilterOp::Ne, "blocked@example.com")
-    .sort(QuerySort::new("created_at", SortOrder::Desc))
-    .limit(25)
-    .offset(50);
-
-let accounts = pool.get_accounts(options).await?;
-```
-
-Separate `.filter(...)` calls are joined with `AND`; an `or()` or `and()`
-`FilterGroup` is parenthesized. `Like` and `ILike` automatically wrap string
-values in `%` wildcards. `IsNull` and `IsNotNull` do not consume a parameter.
-`Search` can be converted into an `OR` group for a query across a list of
-columns.
-
-Values are bound through PostgreSQL parameters. Field names, sort names, view
-filters, view orderings, and table names are SQL text, however, and are not
-escaped or parameterized. Never pass user-provided identifiers to
-`QueryOptions`, `QuerySort`, or a raw `filter`/`order_by` attribute; map user
-input to a closed list of trusted column names first. Built-in filter values are
-strings, `i32`, `bool`, `uuid::Uuid`, `Option<T>`, and enums generated by
-`#[enum_type]`; use a handwritten query for other PostgreSQL value types.
-
-## PostgreSQL enums and JSONB values
-
-`#[enum_type]` generates a Rust enum with Serde and PostgreSQL conversions, a
-`SqlType` implementation, migration metadata, a TypeScript string union, and a
-`FilterValue` implementation:
+Use it on an enum to represent a PostgreSQL enum type:
 
 ```rust
 #[enum_type(
     schema = "public",
-    name = "project_visibility",
-    export_to = "types/database/projects.ts"
+    name = "account_status",
+    export_to = "types/database/accounts.ts"
 )]
-pub enum ProjectVisibility {
-    Public,
-    #[postgres(name = "team_only")]
-    TeamOnly,
+pub enum AccountStatus {
+    Active,
+    #[postgres(name = "suspended_account")]
+    Suspended,
 }
 ```
 
-Variants use their snake-case Rust name as the PostgreSQL/JSON value unless
-`#[postgres(name = "...")]` overrides it. The generated migration creates the
-PostgreSQL enum and adds new values when the Rust enum grows.
+`name` and `export_to` are required; `schema` defaults to `public`. Variants
+use snake-case names as PostgreSQL and JSON values unless `#[postgres(name)]`
+overrides one. The macro implements Serde, `postgres_types::ToSql`/
+`FromSql`, `orm::schema::SqlType`, and `query::FilterValue`, and registers the
+enum for TypeScript and migrations.
 
-`#[json_type]` is for typed JSON/JSONB structs:
+### `#[json_type]`: typed JSONB values
+
+Use it on a named-field struct stored in a `json` or `jsonb` column:
 
 ```rust
-#[json_type(export_to = "types/database/projects.ts")]
-pub struct ProjectSettings {
-    pub archived: bool,
-    pub labels: Vec<String>,
+#[json_type(export_to = "types/database/accounts.ts")]
+pub struct AccountProfile {
+    pub display_name: String,
+    pub avatar_url: Option<String>,
 }
 ```
 
-It derives Serde, converts to and from PostgreSQL `json`/`jsonb`, maps to
-`jsonb` in the schema registry, and exports a TypeScript object type. Use
-`Option<ProjectSettings>` for a nullable JSONB column.
+`export_to` is required. The macro derives Serde, implements PostgreSQL JSON
+conversion and `SqlType` (`jsonb`), and registers a TypeScript object type.
+Use `Option<AccountProfile>` for a nullable JSONB column.
 
-## Read-only views
+### `#[view_type]`: read-only views
 
-`#[view_type]` describes a read-only projection. Each field names its source
-column. The first field supplies the base table; additional tables are joined
-through foreign keys registered by the table macros:
+Use it on a projection struct. Every field names its source column with
+`#[pg(view(...))]`:
 
 ```rust
 #[view_type(
     schema = "public",
     name = "account_cards",
     export_to = "types/database/accounts.ts",
-    filter = "accounts.status = 'active'",
-    order_by = "accounts.created_at DESC"
+    filter = "accounts.email IS NOT NULL",
+    order_by = "accounts.email ASC"
 )]
 pub struct AccountCard {
     #[pg(view(public.accounts.id))]
     pub id: uuid::Uuid,
     #[pg(view(public.accounts.email))]
     pub email: String,
-    #[pg(view(public.profiles.display_name))]
-    pub display_name: String,
 }
 ```
 
-The macro generates `FromRow`, a TypeScript type, and an `AccountCardView`
-trait implemented for `deadpool_postgres::Pool`. With the view name above its
-query method is `get_account_cards(QueryOptions)`. The view is also registered
-for migration generation. `filter` and `order_by` are raw SQL and should only
-contain trusted, application-owned text.
+`schema`, `name`, and `export_to` are required. The first source column supplies
+the base table. Sources from other tables are joined through foreign keys
+declared with `#[pg(foreign(...))]`. The macro generates `FromRow`, a
+TypeScript type, and `AccountCardView::get_account_cards(QueryOptions)` for
+`deadpool_postgres::Pool`. `filter` and `order_by` are raw SQL.
 
-## API types, validation, and endpoint metadata
+### `#[api_type]`: validated API types
 
-`#[api_type]` creates a Serde request/response type, an `orm::Validate`
-implementation, a TypeScript type, and a client-side validator schema:
+Use it on a request/response struct or enum. `export_to` is required:
 
 ```rust
-use axum::{extract::Json, http::StatusCode};
-use orm::{api_type, endpoint, Valid};
-
 #[api_type(export_to = "types/api/accounts.ts")]
 pub struct CreateAccount {
     #[api(validate(email))]
@@ -412,6 +267,22 @@ pub struct CreateAccount {
     #[api(validate(range(min(1), max(100))))]
     pub seats: Option<u32>,
 }
+```
+
+The macro derives Serde, implements `orm::Validate`, exports a TypeScript
+type, and registers a Valibot schema. Runtime rules are `email`, `required`,
+`length(min(...), max(...), equal(...))`, `range(min(...), max(...))`, and
+`regex(r"...")`. `orm::Valid<Json<T>>` and `orm::Valid<Query<T>>` run these
+checks as Axum extractors and return `400` field-error responses.
+
+### `#[endpoint]`: HTTP client metadata
+
+Use it on an Axum handler to register its method, path, request/query types,
+and JSON response type:
+
+```rust
+use axum::{extract::Json, http::StatusCode};
+use orm::{endpoint, Valid};
 
 #[endpoint(POST, "/accounts", "accounts.create")]
 async fn create_account(
@@ -422,117 +293,112 @@ async fn create_account(
 }
 ```
 
-The runtime validation rules are `email`, `required`, `length(min(...),
-max(...), or equal(...))`, `range(min(...), or max(...))`, and
-`regex(r"...")`. Optional fields are checked only when they are present,
-unless they also have `required`. `Valid<Json<T>>` and `Valid<Query<T>>`
-validate the Axum extractor and return a `400` JSON response containing a
-summary and field errors when validation fails.
+The optional third argument is the client method name; without it, a name is
+derived from the method and path. `Valid<Json<T>>` and `Valid<Query<T>>` are
+recognized automatically, as are `Json<T>` responses nested in `Result`.
+`#[endpoint]` does not register the route with Axum—add the handler to your
+`Router` yourself.
 
-`#[endpoint]` only registers metadata; it does not add a route to an Axum
-router. Register the function with Axum as usual. Its metadata records the HTTP
-method, path, request/query types, and a `Json<T>` response type so the
-TypeScript client generator can produce a matching method. Endpoint names may
-contain dots, which become nested client objects; path parameters such as
-`/accounts/{id}` become string arguments.
+## Queries and typed rows
+
+Tables and views implement `FromRow`. `QueryExt` adds typed query methods to
+both `tokio_postgres::Client` and `deadpool_postgres::Client`:
+
+```rust
+use orm::QueryExt;
+
+let client = pool.get().await?;
+let account: Option<Account> = client
+    .query_opt_typed(
+        "SELECT id, email FROM public.accounts WHERE id = $1",
+        &[&account_id],
+    )
+    .await?;
+```
+
+Selected column names must match the Rust fields because generated `FromRow`
+uses `row.try_get("field_name")`.
+
+`QueryOptions` supplies filters, grouped `AND`/`OR` conditions, sorting,
+limits, and offsets to generated CRUD and view queries:
+
+```rust
+use orm::query::{FilterGroup, FilterOp, QueryOptions, QuerySort, SortOrder};
+
+let options = QueryOptions::new()
+    .filter_group(
+        FilterGroup::or()
+            .filter("email", FilterOp::ILike, "example")
+            .filter("status", FilterOp::Eq, AccountStatus::Suspended),
+    )
+    .sort(QuerySort::new("email", SortOrder::Asc))
+    .limit(25)
+    .offset(50);
+
+let accounts = pool.get_accounts(options).await?;
+```
+
+Values are parameterized. Field names, sort names, and raw view/table SQL are
+not; whitelist any identifier derived from user input. Built-in filter values
+are strings, `i32`, `bool`, `Uuid`, `Option<T>`, and `#[enum_type]` enums.
 
 ## TypeScript generation
 
-The built-in generator currently targets TypeScript. Every `#[*_type]` macro
-submits metadata to an `inventory` registry. The `src/bin/orm-cli.rs` binary
-from the setup section exposes that registry to the generator; its intentional
-`use account_api as _` keeps the model library linked into the CLI.
-
-Run it from the application package:
+The `orm-cli` binary from the setup section runs the built-in TypeScript
+generator:
 
 ```sh
 cargo run --bin orm-cli -- generate --lang ts
 cargo run --bin orm-cli -- generate --lang ts --out ./frontend/src/lib
 ```
 
-The command writes the paths from `export_to`, plus the generated validator
-schemas at `schema/schemas.ts`, the endpoint client at `service/client.ts`, and
-the `Result` runtime at `lib/result.ts`. The default client imports use the
-`$lib` prefix; call `orm::lang::ts::generate_client` directly with another
-prefix when your frontend uses a different layout.
+It writes each type to its `export_to` path, plus:
 
-An endpoint named `accounts.create` can then be called from TypeScript like
-this:
+- `schema/schemas.ts` for Valibot schemas;
+- `service/client.ts` for `#[endpoint]` handlers;
+- `lib/result.ts` for the generated `Result` runtime.
+
+An endpoint named `accounts.create` is used like this:
 
 ```ts
-import { createApi } from "$lib/service/client";
-
 const api = createApi({ baseUrl: "/api" });
 const result = await api.accounts.create({
   email: "ana@example.com",
   password: "a sufficiently long password",
   seats: 5,
 });
-
-if (!result.err) {
-  console.log(result.value.id);
-}
 ```
 
-The generated client validates `#[api_type]` request bodies with Valibot before
-sending them and returns a `Result` instead of throwing for transport, HTTP, or
-validation failures. `orm::export::export_all_types` and the
-`ExportBackend` trait are available when building a custom generator.
+Use `orm::export::export_all_types` and implement `ExportBackend` for a custom
+language backend. The current CLI language is TypeScript.
 
 ## Migrations
 
-The macros register tables, enums, and views in a schema registry. The migration
-commands diff that registry against a snapshot and write reviewable `.up.sql`,
-`.down.sql`, and `meta/*.json` files:
+Tables, enums, and views register schema metadata. The CLI diffs that metadata
+against snapshots and writes `.up.sql`, `.down.sql`, and `meta/*.json` files:
 
 ```sh
-# Create migrations/0001_create_accounts.{up,down}.sql and meta/0001.json.
 cargo run --bin orm-cli -- migrate generate create_accounts
-
-# DATABASE_URL is used unless --database-url is supplied.
-DATABASE_URL=postgres://localhost/app \
+DATABASE_URL=postgres://localhost/account_api \
   cargo run --bin orm-cli -- migrate apply
-
 cargo run --bin orm-cli -- migrate status
 cargo run --bin orm-cli -- migrate diff
-cargo run --bin orm-cli -- migrate diff --write reconcile_live_database
+cargo run --bin orm-cli -- migrate diff --write reconcile_database
 ```
 
-Useful commands are:
+`migrate baseline <name>` adopts an existing database without running SQL.
+`migrate revert` runs the latest down migration and removes its files. Review
+generated SQL before applying it; ambiguous renames are interactive by default,
+and enum values cannot be removed by the generated down migration.
 
-- `migrate generate <name>` creates a migration from the latest snapshot.
-- `migrate apply` runs pending migrations transactionally and records them in
-  `_orm_migrations`.
-- `migrate revert` runs the latest down migration when it is applied and removes
-  its files.
-- `migrate baseline <name>` introspects an existing database and records its
-  current schema without executing migration SQL. Use it only for an empty
-  migrations directory.
-- `migrate diff` compares a live database with the Rust registry; `--write`
-  turns the reconciliation into a migration.
-- `migrate status` lists migrations and, when a database URL is available,
-  marks them applied or pending.
+## Lower-level schema APIs
 
-Review generated SQL before applying it. Rename detection is interactive by
-default because a drop/add pair may actually be a data-preserving rename;
-`--no-input` treats ambiguous changes as drop/add. PostgreSQL enum values cannot
-be removed by the generated down migration, so a revert may contain a comment
-requiring a manual type recreation.
-
-## Using the building blocks directly
-
-The generated surfaces are optional. For custom repositories and tooling, the
-crate also exposes:
+For custom tooling, use the schema model directly:
 
 ```rust
 use orm::schema::{assemble_desired_schema, diff, render, DatabaseSchema, NoRenames};
 
 let baseline = DatabaseSchema::default();
 let desired = assemble_desired_schema();
-let changes = diff(&baseline, &desired, &mut NoRenames);
-let migration_sql = render(&changes);
+let sql = render(&diff(&baseline, &desired, &mut NoRenames));
 ```
-
-`orm::schema::introspect` reads PostgreSQL catalog data into the same schema
-model, while `orm::export::export_all_types` and the language backends can be
-used independently of the CLI.
