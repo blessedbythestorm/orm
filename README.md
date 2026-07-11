@@ -8,7 +8,7 @@ The crate is built on `tokio-postgres` and `deadpool-postgres`. It does not hide
 SQL: generated queries and migration SQL are ordinary SQL strings that can be
 reviewed, tested, and supplemented with handwritten queries.
 
-## Install
+## Install and wire up a new Axum project
 
 `orm` is currently consumed from Git. The derive macros are re-exported by
 `orm`; do not depend on the private `macros` crate directly.
@@ -43,16 +43,112 @@ The generated implementations refer to dependencies such as `serde`,
 names. That is why the crates used by your selected macros must be direct
 dependencies of the consuming package.
 
-## A complete example
+### Create the application shell
 
-The following is a small domain model and service layer. `#[enum_type]`,
-`#[json_type]`, and `#[table_type]` register the schema and generate the
-serialization, PostgreSQL, TypeScript, and CRUD code needed by the example.
+Start with an ordinary Axum application. The library target keeps the model
+definitions available to both the HTTP server and the ORM CLI; replace
+`account_api` below with your package's Rust crate name.
+
+```sh
+cargo new account-api
+cd account-api
+```
+
+Use this layout:
+
+```text
+src/
+├── bin/
+│   └── orm-cli.rs
+├── lib.rs
+└── main.rs
+```
+
+Put the model definitions from the next section in `src/lib.rs`. A minimal
+`src/main.rs` can create one PostgreSQL pool, put it in Axum state, and call the
+generated CRUD trait from a handler:
+
+```rust
+use account_api::{Account, AccountCrud};
+use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use deadpool_postgres::{Config, Runtime};
+use orm::query::QueryOptions;
+use tokio::net::TcpListener;
+use tokio_postgres::NoTls;
+
+async fn get_accounts(
+    State(pool): State<deadpool_postgres::Pool>,
+) -> Result<Json<Vec<Account>>, (StatusCode, String)> {
+    pool.get_accounts(QueryOptions::new().limit(50))
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+fn build_pool() -> anyhow::Result<deadpool_postgres::Pool> {
+    let mut config = Config::new();
+    config.url = Some(std::env::var("DATABASE_URL")?);
+    Ok(config.create_pool(Some(Runtime::Tokio1), NoTls)?)
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let pool = build_pool()?;
+    let app = Router::new()
+        .route("/accounts", get(get_accounts))
+        .with_state(pool);
+
+    let listener = TcpListener::bind("127.0.0.1:3000").await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+```
+
+`State<Pool>` is the binding point between Axum and `orm`: the generated CRUD
+implementation is for `deadpool_postgres::Pool`, and each call checks out a
+client from that pool. Do not create a new PostgreSQL connection inside every
+handler. For a handwritten query, check out a client from the same state and
+use `orm::QueryExt` on it.
+
+The CLI binary must link the library containing the macro declarations so
+`inventory` can see their schema and endpoint metadata:
+
+```rust
+// src/bin/orm-cli.rs
+use account_api as _; // intentionally keeps the model crate linked
+
+fn main() -> std::process::ExitCode {
+    orm::cli::main(concat!(env!("CARGO_MANIFEST_DIR"), "/generated"))
+}
+```
+
+After adding the model code, create and apply its schema before starting the
+server:
+
+```sh
+export DATABASE_URL=postgres://localhost/account_api
+
+cargo run --bin orm-cli -- migrate generate create_accounts
+cargo run --bin orm-cli -- migrate apply
+cargo run
+
+# In another terminal:
+curl http://127.0.0.1:3000/accounts
+```
+
+The same pool can be used with `Valid<Json<T>>` or `Valid<Query<T>>` in an API
+handler; the validation and route metadata example appears below.
+
+## Define the domain types
+
+The following `src/lib.rs` example is a small domain model.
+`#[enum_type]`, `#[json_type]`, and `#[table_type]` register the schema and
+generate the serialization, PostgreSQL, TypeScript, and CRUD code needed by the
+example.
 
 ```rust
 use chrono::{DateTime, Utc};
 use orm::{enum_type, json_type, table_type};
-use orm::query::{FilterOp, QueryOptions, QuerySort, SortOrder};
 use uuid::Uuid;
 
 #[enum_type(
@@ -88,36 +184,6 @@ pub struct Account {
     #[pg(default(sql("now()")))]
     #[crud(insert(skip), update(skip))]
     pub created_at: DateTime<Utc>,
-}
-
-pub async fn list_accounts(
-    pool: &deadpool_postgres::Pool,
-) -> anyhow::Result<Vec<Account>> {
-    use crate::AccountCrud;
-
-    let options = QueryOptions::new()
-        .filter("status", FilterOp::Eq, AccountStatus::Active)
-        .filter("email", FilterOp::ILike, "@example.com")
-        .sort(QuerySort::new("created_at", SortOrder::Desc))
-        .limit(50);
-
-    pool.get_accounts(options).await
-}
-
-pub async fn create_account(
-    pool: &deadpool_postgres::Pool,
-    email: String,
-    profile: AccountProfile,
-) -> anyhow::Result<Account> {
-    use crate::{AccountCrud, AccountInsert};
-
-    let input = AccountInsert {
-        email,
-        status: AccountStatus::Active,
-        profile,
-    };
-
-    pool.create_account(&input).await
 }
 ```
 
@@ -360,20 +426,9 @@ contain dots, which become nested client objects; path parameters such as
 ## TypeScript generation
 
 The built-in generator currently targets TypeScript. Every `#[*_type]` macro
-submits metadata to an `inventory` registry. A small binary in the consuming
-application can expose the generator:
-
-```rust
-// src/bin/orm-cli.rs
-
-// Make sure this binary links the crate/module containing every model and
-// endpoint declaration; inventory only sees linked types.
-use my_app::models as _;
-
-fn main() -> std::process::ExitCode {
-    orm::cli::main(concat!(env!("CARGO_MANIFEST_DIR"), "/generated"))
-}
-```
+submits metadata to an `inventory` registry. The `src/bin/orm-cli.rs` binary
+from the setup section exposes that registry to the generator; its intentional
+`use account_api as _` keeps the model library linked into the CLI.
 
 Run it from the application package:
 
