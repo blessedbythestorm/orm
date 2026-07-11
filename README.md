@@ -54,14 +54,27 @@ cargo new account-api
 cd account-api
 ```
 
+This project has two separate binaries:
+
+- `src/main.rs` is the server binary. It builds the PostgreSQL pool, starts the
+  Axum router, and serves HTTP requests. Run it with `cargo run`.
+- `src/bin/orm-cli.rs` is the ORM CLI binary. It runs schema migrations and
+  TypeScript generation. Run it with `cargo run --bin orm-cli -- ...`.
+
+They are separate entrypoints because `orm::cli::main` parses CLI arguments
+and exits; it should not replace the Axum server's `main`. Both binaries link
+the library target, so both can see the same macro registrations through
+`inventory`. Adding `src/lib.rs` does not remove the server binary created by
+`cargo new`—it gives the package shared code that both binaries can import.
+
 Use this layout:
 
 ```text
 src/
 ├── bin/
-│   └── orm-cli.rs
-├── lib.rs
-└── main.rs
+│   └── orm-cli.rs  # ORM CLI binary
+├── lib.rs          # shared models and ORM declarations
+└── main.rs         # Axum server binary
 ```
 
 Put the model definitions from the next section in `src/lib.rs`. A minimal
