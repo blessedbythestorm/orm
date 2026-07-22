@@ -8,7 +8,7 @@ pub enum SchemaChange {
     DropSchema(String),
     CreateEnum(EnumType),
     DropEnum(String),
-    AddEnumValues { name: String, values: Vec<String> },
+    ReplaceEnum { old: EnumType, new: EnumType, dependents: Vec<EnumDependent> },
     CreateTable(Table),
     DropTable(TableReference),
     RenameTable { table: TableReference, to: String },
@@ -18,13 +18,24 @@ pub enum SchemaChange {
     Comment(String),
 }
 
+/// A column that stores a replaced enum, carrying what the rewrite needs: the
+/// default is dropped and restored around the cast, and nullability picks the
+/// fallback for rows holding a value the new enum no longer has.
+#[derive(Debug, Clone)]
+pub struct EnumDependent {
+    pub table: TableReference,
+    pub column: String,
+    pub nullable: bool,
+    pub default: Option<String>,
+}
+
 /// A single column-level operation, scoped to a table by [`SchemaChange::AlterColumn`].
 #[derive(Debug, Clone)]
 pub enum ColumnOp {
     Add(Column),
     Drop(String),
     Rename { from: String, to: String },
-    SetType { column: String, sql_type: String },
+    SetType { column: String, sql_type: String, using: Option<String> },
     SetNullable { column: String, nullable: bool },
     SetDefault { column: String, default: Option<String> },
 }
@@ -63,20 +74,58 @@ pub fn diff(
 struct Differ<'a> {
     resolver: &'a mut dyn RenameResolver,
     changes: Vec<SchemaChange>,
+    desired_enums: BTreeSet<String>,
+}
+
+/// The table-level work of a diff, resolved up front so table drops can be
+/// emitted before enum changes while creates, renames, and column diffs come
+/// after them.
+struct TablePlan<'a> {
+    created: Vec<&'a Table>,
+    renamed: Vec<(&'a Table, &'a Table)>,
+    dropped: Vec<&'a Table>,
 }
 
 impl<'a> Differ<'a> {
     fn new(resolver: &'a mut dyn RenameResolver) -> Self {
-        Self { resolver, changes: Vec::new() }
+        Self { resolver, changes: Vec::new(), desired_enums: BTreeSet::new() }
     }
 
+    /// Walks the schemas in dependency order: views drop first (they depend on
+    /// tables), then doomed tables (they may hold columns of a changed enum),
+    /// then enum creates/replaces (types must exist before the tables and
+    /// columns that use them), then table creates/renames/column changes, then
+    /// enum drops (a column must move off a type before it can go), then views.
     fn run(mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema) -> Vec<SchemaChange> {
+        self.desired_enums = desired.enums.keys().cloned().collect();
         self.diff_schemas(baseline, desired);
-        self.diff_enums(baseline, desired);
-        // A view depends on its base tables, so drop removed/changed views *before*
-        // touching tables and (re)create them *after* — keeping dependency order.
+
+        let plan = self.plan_tables(baseline, desired);
+
         self.drop_views(baseline, desired);
-        self.diff_tables(baseline, desired);
+
+        for table in &plan.dropped {
+            self.emit(SchemaChange::DropTable(table.reference()));
+        }
+
+        self.diff_enums(baseline, desired, &plan);
+
+        for table in order_by_dependencies(plan.created.clone()) {
+            self.emit(SchemaChange::CreateTable(table.clone()));
+        }
+
+        for (old_table, new_table) in &plan.renamed {
+            self.emit(SchemaChange::RenameTable { table: old_table.reference(), to: new_table.name.clone() });
+            self.diff_columns(old_table, new_table);
+        }
+
+        for desired_table in desired.tables.values() {
+            if let Some(baseline_table) = baseline.tables.get(&desired_table.qualified_name()) {
+                self.diff_columns(baseline_table, desired_table);
+            }
+        }
+
+        self.drop_enums(baseline, desired);
         self.create_views(baseline, desired);
         self.changes
     }
@@ -98,21 +147,39 @@ impl<'a> Differ<'a> {
         }
     }
 
-    fn diff_enums(&mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema) {
+    /// Emits enum creates and replaces. Postgres cannot remove, rename, or
+    /// reorder enum values (and `ADD VALUE` can't be used later inside the same
+    /// transaction our migrations run in), so ANY value change becomes a
+    /// [`SchemaChange::ReplaceEnum`]: recreate the type and re-point every
+    /// surviving column that stores it. Columns of tables dropped by this same
+    /// migration are already gone by the time the replace runs.
+    fn diff_enums(&mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema, plan: &TablePlan) {
+        let doomed: BTreeSet<String> = plan.dropped.iter().map(|table| table.qualified_name()).collect();
+
         for (name, desired_enum) in &desired.enums {
             let Some(baseline_enum) = baseline.enums.get(name) else {
                 self.emit(SchemaChange::CreateEnum(desired_enum.clone()));
                 continue;
             };
 
-            let added: Vec<String> = desired_enum
-                .values
-                .iter()
-                .filter(|value| !baseline_enum.values.contains(value))
-                .cloned()
-                .collect();
-            if !added.is_empty() {
-                self.emit(SchemaChange::AddEnumValues { name: name.clone(), values: added });
+            if baseline_enum.values == desired_enum.values {
+                continue;
+            }
+
+            self.emit(SchemaChange::ReplaceEnum {
+                old: baseline_enum.clone(),
+                new: desired_enum.clone(),
+                dependents: enum_dependents(baseline, name, &doomed),
+            });
+        }
+    }
+
+    /// Drops enums that vanished from the desired schema. Runs after all table
+    /// changes so every column has already moved off the type.
+    fn drop_enums(&mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema) {
+        for name in baseline.enums.keys() {
+            if !desired.enums.contains_key(name) {
+                self.emit(SchemaChange::DropEnum(name.clone()));
             }
         }
     }
@@ -147,7 +214,9 @@ impl<'a> Differ<'a> {
         }
     }
 
-    fn diff_tables(&mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema) {
+    /// Splits tables into created / renamed / dropped, resolving renames through
+    /// the resolver up front so the phases of [`run`] can be emitted in order.
+    fn plan_tables<'b>(&mut self, baseline: &'b DatabaseSchema, desired: &'b DatabaseSchema) -> TablePlan<'b> {
         let created = tables_missing_from(desired, baseline);
         let mut dropped = tables_missing_from(baseline, desired);
 
@@ -160,24 +229,7 @@ impl<'a> Differ<'a> {
             }
         }
 
-        for table in order_by_dependencies(newly_created) {
-            self.emit(SchemaChange::CreateTable(table.clone()));
-        }
-
-        for (old_table, new_table) in renamed {
-            self.emit(SchemaChange::RenameTable { table: old_table.reference(), to: new_table.name.clone() });
-            self.diff_columns(old_table, new_table);
-        }
-
-        for desired_table in desired.tables.values() {
-            if let Some(baseline_table) = baseline.tables.get(&desired_table.qualified_name()) {
-                self.diff_columns(baseline_table, desired_table);
-            }
-        }
-
-        for table in dropped {
-            self.emit(SchemaChange::DropTable(table.reference()));
-        }
+        TablePlan { created: newly_created, renamed, dropped }
     }
 
     fn diff_columns(&mut self, baseline_table: &Table, desired_table: &Table) {
@@ -211,9 +263,13 @@ impl<'a> Differ<'a> {
     fn diff_column_attributes(&mut self, table: &TableReference, old: &Column, new: &Column) {
         let column = new.name.clone();
         if old.sql_type != new.sql_type {
+            let using = self
+                .desired_enums
+                .contains(&new.sql_type)
+                .then(|| format!("{}::text::{}", column, new.sql_type));
             self.alter_column(
                 table,
-                ColumnOp::SetType { column: column.clone(), sql_type: new.sql_type.clone() },
+                ColumnOp::SetType { column: column.clone(), sql_type: new.sql_type.clone(), using },
             );
         }
         if old.nullable != new.nullable {
@@ -247,6 +303,36 @@ impl<'a> Differ<'a> {
     }
 }
 
+/// Every surviving column that stores `enum_name`: the columns a
+/// [`SchemaChange::ReplaceEnum`] must re-point. Tables in `doomed` are dropped
+/// by the same migration before the replace runs, so they are skipped.
+fn enum_dependents(
+    baseline: &DatabaseSchema,
+    enum_name: &str,
+    doomed: &BTreeSet<String>,
+) -> Vec<EnumDependent> {
+    let mut dependents = Vec::new();
+
+    for table in baseline.tables.values() {
+        if doomed.contains(&table.qualified_name()) {
+            continue;
+        }
+
+        for column in &table.columns {
+            if column.sql_type == enum_name {
+                dependents.push(EnumDependent {
+                    table: table.reference(),
+                    column: column.name.clone(),
+                    nullable: column.nullable,
+                    default: column.default.clone(),
+                });
+            }
+        }
+    }
+
+    dependents
+}
+
 /// Tables present in `a` but not in `b`, keyed by qualified name.
 fn tables_missing_from<'a>(a: &'a DatabaseSchema, b: &DatabaseSchema) -> Vec<&'a Table> {
     a.tables.values().filter(|table| !b.tables.contains_key(&table.qualified_name())).collect()
@@ -273,10 +359,11 @@ fn invert_one(change: &SchemaChange, baseline: &DatabaseSchema) -> SchemaChange 
         DropSchema(name) => CreateSchema(name.clone()),
         CreateEnum(enum_type) => DropEnum(enum_type.name.clone()),
         DropEnum(name) => recreate_enum(baseline, name),
-        AddEnumValues { name, values } => Comment(format!(
-            "cannot drop value(s) {} from enum {name}; reverting needs a type recreate",
-            values.join(", ")
-        )),
+        ReplaceEnum { old, new, dependents } => ReplaceEnum {
+            old: new.clone(),
+            new: old.clone(),
+            dependents: dependents.clone(),
+        },
         Comment(text) => Comment(text.clone()),
         CreateTable(table) => DropTable(table.reference()),
         DropTable(table) => recreate_table(baseline, table),
@@ -327,7 +414,11 @@ fn invert_column(baseline: &DatabaseSchema, table: &TableReference, op: &ColumnO
             None => cannot_revert(table, column, "restore"),
         },
         ColumnOp::SetType { column, .. } => revert_attribute(baseline, table, column, "type", |existing| {
-            ColumnOp::SetType { column: column.clone(), sql_type: existing.sql_type.clone() }
+            let using = baseline
+                .enums
+                .contains_key(&existing.sql_type)
+                .then(|| format!("{}::text::{}", column, existing.sql_type));
+            ColumnOp::SetType { column: column.clone(), sql_type: existing.sql_type.clone(), using }
         }),
         ColumnOp::SetNullable { column, .. } => {
             revert_attribute(baseline, table, column, "nullability", |existing| ColumnOp::SetNullable {

@@ -1,6 +1,6 @@
 use std::fmt::{self, Display, Formatter};
 
-use super::diff::{ColumnOp, SchemaChange};
+use super::diff::{ColumnOp, EnumDependent, SchemaChange};
 use super::model::{Column, EnumType, ForeignKey, Table};
 
 /// Renders an ordered list of schema changes into a single SQL migration script.
@@ -17,7 +17,9 @@ impl Display for SchemaChange {
             Self::DropSchema(name) => write!(f, "DROP SCHEMA IF EXISTS {name};"),
             Self::CreateEnum(enum_type) => write!(f, "{}", create_type(enum_type)),
             Self::DropEnum(name) => write!(f, "DROP TYPE IF EXISTS {name};"),
-            Self::AddEnumValues { name, values } => write!(f, "{}", add_enum_values(name, values)),
+            Self::ReplaceEnum { old, new, dependents } => {
+                write!(f, "{}", replace_enum(old, new, dependents))
+            }
             Self::CreateTable(table) => write!(f, "{}", create_table(table)),
             Self::DropTable(table) => write!(f, "DROP TABLE {};", table.qualified_name()),
             Self::RenameTable { table, to } => {
@@ -39,7 +41,12 @@ impl Display for ColumnOp {
             Self::Add(column) => write!(f, "ADD COLUMN {}", column_definition(column)),
             Self::Drop(column) => write!(f, "DROP COLUMN {column}"),
             Self::Rename { from, to } => write!(f, "RENAME COLUMN {from} TO {to}"),
-            Self::SetType { column, sql_type } => write!(f, "ALTER COLUMN {column} TYPE {sql_type}"),
+            Self::SetType { column, sql_type, using: Some(expression) } => {
+                write!(f, "ALTER COLUMN {column} TYPE {sql_type} USING {expression}")
+            }
+            Self::SetType { column, sql_type, using: None } => {
+                write!(f, "ALTER COLUMN {column} TYPE {sql_type}")
+            }
             Self::SetNullable { column, nullable } => {
                 let action = if *nullable { "DROP NOT NULL" } else { "SET NOT NULL" };
                 write!(f, "ALTER COLUMN {column} {action}")
@@ -57,12 +64,106 @@ fn create_type(enum_type: &EnumType) -> String {
     format!("CREATE TYPE {} AS ENUM ({});", enum_type.name, values.join(", "))
 }
 
-fn add_enum_values(name: &str, values: &[String]) -> String {
-    values
+/// Recreates a changed enum in place — Postgres cannot remove, rename, or
+/// reorder enum values, so: rename the old type aside, create the new one under
+/// the original name, re-point every dependent column with a text cast (rows
+/// holding a value the new enum dropped fall back per [`fallback_value`], and a
+/// column default is dropped and restored around the cast), then drop the old
+/// type.
+fn replace_enum(old: &EnumType, new: &EnumType, dependents: &[EnumDependent]) -> String {
+    let renamed = match new.name.rsplit_once('.') {
+        Some((schema, bare)) => format!("{schema}.{bare}_old"),
+        None => format!("{}_old", new.name),
+    };
+    let bare_renamed = match new.name.rsplit_once('.') {
+        Some((_, bare)) => format!("{bare}_old"),
+        None => format!("{}_old", new.name),
+    };
+
+    let mut statements = vec![
+        format!("ALTER TYPE {} RENAME TO {bare_renamed};", new.name),
+        create_type(new),
+    ];
+
+    for dependent in dependents {
+        let table = dependent.table.qualified_name();
+        let column = &dependent.column;
+
+        if dependent.default.is_some() {
+            statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT;"));
+        }
+
+        statements.push(format!(
+            "ALTER TABLE {table} ALTER COLUMN {column} TYPE {} USING {};",
+            new.name,
+            cast_expression(old, new, dependent),
+        ));
+
+        if let Some(default) = &dependent.default {
+            statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT {default};"));
+        }
+    }
+
+    statements.push(format!("DROP TYPE {renamed};"));
+    statements.join("\n")
+}
+
+/// The USING expression that re-points a column at the recreated enum. When
+/// every old value survives it is a plain text cast; otherwise surviving values
+/// cast through and removed values collapse to the fallback.
+fn cast_expression(old: &EnumType, new: &EnumType, dependent: &EnumDependent) -> String {
+    let column = &dependent.column;
+    let kept: Vec<String> = old
+        .values
         .iter()
-        .map(|value| format!("ALTER TYPE {name} ADD VALUE IF NOT EXISTS '{value}';"))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .filter(|value| new.values.contains(value))
+        .map(|value| format!("'{value}'"))
+        .collect();
+
+    if kept.len() == old.values.len() {
+        return format!("{column}::text::{}", new.name);
+    }
+
+    if kept.is_empty() {
+        return format!("{}::{}", fallback_value(new, dependent), new.name);
+    }
+
+    format!(
+        "(CASE WHEN {column}::text IN ({}) THEN {column}::text ELSE {} END)::{}",
+        kept.join(", "),
+        fallback_value(new, dependent),
+        new.name,
+    )
+}
+
+/// The value rows fall back to when they hold an enum value the new type no
+/// longer has: the column's default when it is still a valid value, else NULL
+/// when the column is nullable, else the first value of the new enum.
+fn fallback_value(new: &EnumType, dependent: &EnumDependent) -> String {
+    let default = dependent.default.as_deref().and_then(default_literal);
+
+    if let Some(value) = default {
+        if new.values.iter().any(|candidate| candidate == value) {
+            return format!("'{value}'");
+        }
+    }
+
+    if dependent.nullable {
+        return "NULL".to_string();
+    }
+
+    match new.values.first() {
+        Some(value) => format!("'{value}'"),
+        None => "NULL".to_string(),
+    }
+}
+
+/// Extracts the quoted literal from a column default like `'open'` or
+/// `'open'::core.order_status`.
+fn default_literal(default: &str) -> Option<&str> {
+    let start = default.find('\'')? + 1;
+    let end = default[start..].find('\'')? + start;
+    Some(&default[start..end])
 }
 
 fn create_table(table: &Table) -> String {
