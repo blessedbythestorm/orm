@@ -6,10 +6,8 @@ use crate::api_type;
 
 #[api_type(export_to = "types/api/query.ts")]
 pub struct Pagination {
-    #[api(validate(range(min(1), max(100))))]
-    pub limit: u32,
-    #[api(validate(range(min(0))))]
-    pub offset: u32,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
 }
 
 #[api_type(export_to = "types/api/query.ts")]

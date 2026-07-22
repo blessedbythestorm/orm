@@ -42,16 +42,18 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let path = args.path.value();
     let name = args.name.map(|n| n.value()).unwrap_or_else(|| auto_name(&method, &path));
 
-    // Request body and query types come from the handler's extractors.
+    // Request body and query types come from the handler's extractors. Every
+    // `Query<T>` is kept — a handler can split its query string across several
+    // (Pagination, Sort, Search) and the client types their intersection.
     let mut request_ty: Option<Type> = None;
-    let mut query_ty: Option<Type> = None;
+    let mut query_tys: Vec<Type> = Vec::new();
     for input in &func.sig.inputs {
         if let FnArg::Typed(arg) = input {
             if request_ty.is_none() {
                 request_ty = extract_wrapped(&arg.ty, "Json");
             }
-            if query_ty.is_none() {
-                query_ty = extract_wrapped(&arg.ty, "Query");
+            if let Some(query) = extract_wrapped(&arg.ty, "Query") {
+                query_tys.push(query);
             }
         }
     }
@@ -63,7 +65,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let request = type_ref(request_ty.as_ref());
-    let query = type_ref(query_ty.as_ref());
+    let queries: Vec<TokenStream> = query_tys.iter().map(bare_type_ref).collect();
     let response = type_ref(response_ty.as_ref());
 
     quote! {
@@ -75,7 +77,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 path: #path,
                 name: #name,
                 request: #request,
-                query: #query,
+                queries: &[#(#queries),*],
                 response: #response,
             }
         }
@@ -85,11 +87,16 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn type_ref(ty: Option<&Type>) -> TokenStream {
     match ty {
         Some(ty) => {
-            let (field_ty, _) = crate::export::field_type(ty);
-            quote! { ::core::option::Option::Some(::orm::registry::TypeRef { ty: #field_ty }) }
+            let bare = bare_type_ref(ty);
+            quote! { ::core::option::Option::Some(#bare) }
         }
         None => quote! { ::core::option::Option::None },
     }
+}
+
+fn bare_type_ref(ty: &Type) -> TokenStream {
+    let (field_ty, _) = crate::export::field_type(ty);
+    quote! { ::orm::registry::TypeRef { ty: #field_ty } }
 }
 
 /// `Json<T>` or `Valid<Json<T>>` (resp. `Query`) -> `T`.

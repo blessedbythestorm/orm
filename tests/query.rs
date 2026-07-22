@@ -76,3 +76,58 @@ fn null_ops_need_no_value() {
     assert!(!FilterOp::IsNotNull.needs_value());
     assert!(FilterOp::Eq.needs_value());
 }
+
+#[test]
+fn from_params_defaults_and_caps_pagination() {
+    use orm::query::{Pagination, Search, Sort};
+
+    let options = QueryOptions::from_params(
+        Pagination { limit: Some(500), offset: None },
+        Sort { sort_by: None, sort_order: None },
+        Search { query: None, fields: None },
+    );
+
+    assert_eq!(options.limit, Some(100));
+    assert_eq!(options.offset, Some(0));
+    assert_eq!(options.to_sql_suffix(), " LIMIT 100 OFFSET 0");
+}
+
+#[test]
+fn from_params_rejects_a_sort_injection() {
+    use orm::query::{Pagination, Search, Sort};
+
+    let options = QueryOptions::from_params(
+        Pagination { limit: None, offset: None },
+        Sort { sort_by: Some("name; DROP TABLE users--".into()), sort_order: None },
+        Search { query: None, fields: None },
+    );
+
+    assert!(!options.to_sql_suffix().contains("ORDER BY"));
+}
+
+#[test]
+fn from_params_searches_only_identifier_fields() {
+    use orm::query::{Pagination, Search, Sort};
+
+    let options = QueryOptions::from_params(
+        Pagination { limit: None, offset: None },
+        Sort { sort_by: None, sort_order: None },
+        Search { query: Some("ana".into()), fields: Some("name, evil()".into()) },
+    );
+
+    let (sql, _) = options.build_where_clause(1);
+    assert_eq!(sql, " WHERE name ILIKE $1");
+}
+
+#[test]
+fn from_params_sorts_by_a_valid_field() {
+    use orm::query::{Pagination, Search, Sort};
+
+    let options = QueryOptions::from_params(
+        Pagination { limit: None, offset: None },
+        Sort { sort_by: Some("created_at".into()), sort_order: Some(SortOrder::Desc) },
+        Search { query: None, fields: None },
+    );
+
+    assert!(options.to_sql_suffix().contains(" ORDER BY created_at DESC"));
+}

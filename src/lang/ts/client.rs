@@ -85,7 +85,11 @@ pub fn generate_client(out_dir: &str, types_prefix: &str) -> anyhow::Result<()> 
 
     let paths = crate::export::type_paths();
     for endpoint in &endpoints {
-        for type_ref in [&endpoint.request, &endpoint.query, &endpoint.response].into_iter().flatten() {
+        let refs = [&endpoint.request, &endpoint.response]
+            .into_iter()
+            .flatten()
+            .chain(endpoint.queries.iter());
+        for type_ref in refs {
             let Some(name) = named(type_ref.ty) else { continue };
             let Some(&path) = paths.get(name) else { continue };
             imports
@@ -93,7 +97,7 @@ pub fn generate_client(out_dir: &str, types_prefix: &str) -> anyhow::Result<()> 
                 .or_default()
                 .insert(name.to_string());
         }
-        if endpoint.query.is_some() {
+        if !endpoint.queries.is_empty() {
             needs_query = true;
         }
 
@@ -196,8 +200,10 @@ fn render_method(endpoint: &EndpointMeta, validated: Option<&str>) -> String {
     if let Some(request) = &endpoint.request {
         args.push(format!("body: {}", TypeScript.type_expr(request.ty)));
     }
-    if let Some(query) = &endpoint.query {
-        args.push(format!("query: {}", TypeScript.type_expr(query.ty)));
+    if !endpoint.queries.is_empty() {
+        let intersection: Vec<String> =
+            endpoint.queries.iter().map(|query| TypeScript.type_expr(query.ty)).collect();
+        args.push(format!("query: {}", intersection.join(" & ")));
     }
 
     let returns = endpoint
@@ -207,9 +213,9 @@ fn render_method(endpoint: &EndpointMeta, validated: Option<&str>) -> String {
         .unwrap_or_else(|| "void".to_string());
 
     let path = endpoint.path.replace('{', "${");
-    let url = match endpoint.query {
-        Some(_) => format!("`{path}` + toQuery(query)"),
-        None => format!("`{path}`"),
+    let url = match endpoint.queries.is_empty() {
+        false => format!("`{path}` + toQuery(query)"),
+        true => format!("`{path}`"),
     };
 
     let method = endpoint.method;

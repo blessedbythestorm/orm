@@ -3,7 +3,26 @@ use std::sync::Arc;
 
 use tokio_postgres::types::ToSql;
 
-use super::{Search, SortOrder};
+use super::{Pagination, Search, Sort, SortOrder};
+
+/// The largest page a caller can request through [`QueryOptions::from_params`].
+const MAX_LIMIT: u32 = 100;
+
+/// The page size used when the caller doesn't ask for one.
+const DEFAULT_LIMIT: u32 = 50;
+
+/// True when `field` is a plain column identifier, safe to interpolate into
+/// SQL. Field names arriving from query parameters (sort, search fields) must
+/// pass this before they reach `ORDER BY` or `WHERE`.
+fn is_identifier(field: &str) -> bool {
+    let mut chars = field.chars();
+
+    let starts_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+
+    starts_ok && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 
 pub trait FilterValue {
     fn into_filter_value(self, op: FilterOp) -> Option<Arc<dyn ToSql + Send + Sync>>;
@@ -95,6 +114,9 @@ impl From<Search> for FilterGroup {
             return group;
         };
         for field in search.field_list() {
+            if !is_identifier(&field) {
+                continue;
+            }
             if let Some(converted) = query.clone().into_filter_value(FilterOp::ILike) {
                 group.filters.push(Filter { field, op: FilterOp::ILike, value: converted });
             }
@@ -168,6 +190,24 @@ impl QuerySort {
 impl QueryOptions {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Builds options straight from the standard list query parameters:
+    /// pagination (defaulted and capped), an optional sort, and an optional
+    /// free-text search. Sort and search field names are ignored unless they
+    /// are plain identifiers — they end up interpolated into SQL, so nothing
+    /// else may pass.
+    pub fn from_params(pagination: Pagination, sort: Sort, search: Search) -> Self {
+        let mut options = Self::new()
+            .limit(pagination.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT))
+            .offset(pagination.offset.unwrap_or(0))
+            .filter_group(search.into());
+
+        if let Some(field) = sort.sort_by.filter(|field| is_identifier(field)) {
+            options = options.sort(QuerySort::new(field, sort.sort_order.unwrap_or_default()));
+        }
+
+        options
     }
 
     pub fn limit(mut self, limit: u32) -> Self {
@@ -249,7 +289,7 @@ impl QueryOptions {
 
     pub fn to_sql_suffix(&self) -> String {
         let mut sql = String::new();
-        if let Some(ref field) = self.sort_by {
+        if let Some(field) = self.sort_by.as_deref().filter(|field| is_identifier(field)) {
             let _ = write!(sql, " ORDER BY {} {}", field, self.sort_order.unwrap_or_default().as_str());
         }
         if let Some(limit) = self.limit {
