@@ -102,7 +102,7 @@ fn invert_turns_create_table_into_drop() {
     let changes = diff(&baseline, &desired, &mut NoRenames);
 
     let down = render(&invert(&changes, &baseline));
-    assert!(down.contains("DROP TABLE public.widgets;"), "{down}");
+    assert!(down.contains("DROP TABLE public.widgets CASCADE;"), "{down}");
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn a_dropped_table_is_dropped_before_the_enum_replace_and_excluded_from_it() {
     let desired = schema_with_enum(&["live", "ended", "paused"], vec![table("widgets", vec![status_col()])]);
 
     let sql = up(&baseline, &desired);
-    let drop_position = sql.find("DROP TABLE public.gadgets;").expect("gadgets dropped");
+    let drop_position = sql.find("DROP TABLE public.gadgets CASCADE;").expect("gadgets dropped");
     let replace_position = sql.find("ALTER TYPE public.status RENAME TO").expect("status replaced");
     assert!(drop_position < replace_position, "{sql}");
     assert!(!sql.contains("ALTER TABLE public.gadgets ALTER COLUMN"), "{sql}");

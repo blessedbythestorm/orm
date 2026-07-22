@@ -21,7 +21,7 @@ impl Display for SchemaChange {
                 write!(f, "{}", replace_enum(old, new, dependents))
             }
             Self::CreateTable(table) => write!(f, "{}", create_table(table)),
-            Self::DropTable(table) => write!(f, "DROP TABLE {};", table.qualified_name()),
+            Self::DropTable(table) => write!(f, "DROP TABLE {} CASCADE;", table.qualified_name()),
             Self::RenameTable { table, to } => {
                 write!(f, "ALTER TABLE {} RENAME TO {to};", table.qualified_name())
             }
