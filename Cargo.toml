@@ -35,3 +35,6 @@ validator = { version = "0.20.0", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["serde", "v4"] }
+inventory = "0.3"
