@@ -127,26 +127,51 @@ fn generate_create(table: &TableDef) -> TokenStream {
     let columns = table.column_list();
     let err_msg = format!("Failed to create {}", table.name_snake);
 
-    let insert_fields: Vec<_> = table.update_fields().collect();
-    let insert_columns = insert_fields.iter().map(|f| f.name_str.as_str()).collect::<Vec<_>>().join(", ");
-    let placeholders = (1..=insert_fields.len()).map(|i| format!("${}", i)).collect::<Vec<_>>().join(", ");
-    let sql = format!(
-        "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
-        full_table, insert_columns, placeholders, columns
-    );
-
-    let params = insert_fields.iter().map(|f| {
+    let collectors = table.insert_fields().map(|f| {
         let field = &f.name;
-        quote! { &data.#field as &(dyn tokio_postgres::types::ToSql + Sync) }
+        let field_str = &f.name_str;
+
+        if f.is_auto_generated {
+            quote! {
+                if let Some(ref value) = data.#field {
+                    insert_columns.push(#field_str);
+                    params.push(value as &(dyn tokio_postgres::types::ToSql + Sync));
+                }
+            }
+        } else {
+            quote! {
+                insert_columns.push(#field_str);
+                params.push(&data.#field as &(dyn tokio_postgres::types::ToSql + Sync));
+            }
+        }
     });
 
     quote! {
         use ::orm::FromRow;
 
         let client = self.get().await?;
-        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![#(#params),*];
+        let mut insert_columns: Vec<&str> = Vec::new();
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
 
-        let row = client.query_one(#sql, &params).await
+        #(#collectors)*
+
+        let sql = if insert_columns.is_empty() {
+            format!("INSERT INTO {} DEFAULT VALUES RETURNING {}", #full_table, #columns)
+        } else {
+            let placeholders = (1..=insert_columns.len())
+                .map(|i| format!("${}", i))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+                #full_table,
+                insert_columns.join(", "),
+                placeholders,
+                #columns
+            )
+        };
+
+        let row = client.query_one(&sql, &params).await
             .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
 
         #name::from_row(&row).map_err(|e| anyhow::anyhow!("Row parse error: {}", e))
