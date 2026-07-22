@@ -1,12 +1,9 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use syn::ItemStruct;
-
 use super::parse::TableDef;
-use super::validation;
 
-pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
+pub fn generate(table: &TableDef) -> TokenStream {
     let name = format_ident!("{}Insert", table.name);
     let export_path = table.export_path();
     let fields = generate_fields(table);
@@ -17,9 +14,6 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
         .collect();
     let ts_export = crate::export::struct_export(&name.to_string(), export_path, &[], &ts_fields);
 
-    let rule_fields = validation::validation_fields(table.insert_fields(), input, |f| f.is_auto_generated);
-    let validation = validation::validation(&name, &rule_fields);
-
     quote! {
         #ts_export
 
@@ -28,7 +22,13 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
             #(#fields),*
         }
 
-        #validation
+        // Always-Ok so `Valid<Json<#name>>` works; field-level validation of
+        // inserts isn't wired yet (rules live on the api request types).
+        impl ::orm::validate::Validate for #name {
+            fn validate(&self) -> ::std::result::Result<(), ::orm::validate::ValidationErrors> {
+                ::std::result::Result::Ok(())
+            }
+        }
     }
 }
 

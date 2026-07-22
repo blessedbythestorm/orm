@@ -5,7 +5,6 @@ mod parse;
 mod schema;
 mod struct_def;
 mod update;
-mod validation;
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -26,8 +25,8 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let struct_def = struct_def::generate(&table, &input);
     let from_row = from_row::generate(&table);
-    let insert = insert::generate(&table, &input);
-    let update = update::generate(&table, &input);
+    let insert = insert::generate(&table);
+    let update = update::generate(&table);
     let crud = crud::generate(&table);
     let schema = schema::generate(&table);
 
