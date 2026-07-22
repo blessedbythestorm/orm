@@ -1,9 +1,9 @@
 mod item_def;
 mod parse;
-mod validator;
-// Shared `#[api(validate(...))]` codegen — also used by `table_type` for the
-// orm-owned `Validate` impl.
+// Shared `#[api(validate(...))]` and schema codegen — also used by `table_type`
+// for the orm-owned `Validate` impls and schemas of Insert/Update structs.
 pub(crate) mod validate;
+pub(crate) mod validator;
 
 use proc_macro2::TokenStream;
 use quote::quote;
