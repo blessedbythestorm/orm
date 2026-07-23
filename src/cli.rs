@@ -37,6 +37,9 @@ enum Command {
     /// Generate and inspect schema migrations from the registered types.
     #[command(subcommand)]
     Migrate(MigrateCommand),
+    /// Generate and apply run-once seed-data scripts.
+    #[command(subcommand)]
+    Seed(SeedCommand),
 }
 
 impl Command {
@@ -44,6 +47,46 @@ impl Command {
         match self {
             Command::Generate { lang, out } => generate(&lang, &out.unwrap_or_else(|| default_out.to_string())),
             Command::Migrate(command) => command.run(),
+            Command::Seed(command) => command.run(),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum SeedCommand {
+    /// Write a new empty seed script into the seeds directory.
+    Generate {
+        /// Name for the seed file.
+        name: String,
+        /// Directory holding seed scripts.
+        #[arg(long, default_value = "seeds")]
+        dir: String,
+    },
+    /// Apply pending seeds (each recorded in _orm_seeds, so they run once).
+    Apply {
+        #[arg(long, default_value = "seeds")]
+        dir: String,
+        /// Defaults to the DATABASE_URL environment variable.
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+    /// List seeds and which are applied vs pending.
+    Status {
+        #[arg(long, default_value = "seeds")]
+        dir: String,
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+}
+
+impl SeedCommand {
+    fn run(self) -> anyhow::Result<()> {
+        use crate::seed;
+
+        match self {
+            SeedCommand::Generate { name, dir } => seed::generate(Path::new(&dir), &name),
+            SeedCommand::Apply { dir, database_url } => seed::apply(Path::new(&dir), database_url),
+            SeedCommand::Status { dir, database_url } => seed::status(Path::new(&dir), database_url),
         }
     }
 }

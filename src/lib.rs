@@ -19,6 +19,7 @@ pub mod migrate;
 pub mod query;
 pub mod registry;
 pub mod schema;
+pub mod seed;
 pub mod style;
 pub mod traits;
 pub mod validate;
