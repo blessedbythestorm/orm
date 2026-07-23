@@ -69,7 +69,15 @@ impl MigrationStore {
         serde_json::from_str(&contents).with_context(|| format!("parsing snapshot {}", path.display()))
     }
 
-    /// Writes a migration's up/down SQL and snapshot, returning its stem.
+    /// A migration script: the rendered changes behind a transaction-local lock
+/// timeout, so a DDL statement queueing behind a long-running query fails fast
+/// instead of blocking everything queued after it (migrations run in one
+/// transaction, so `SET LOCAL` scopes exactly to the migration).
+fn script(changes: &[SchemaChange]) -> String {
+    format!("SET LOCAL lock_timeout = '5s';\n\n{}", render(changes))
+}
+
+/// Writes a migration's up/down SQL and snapshot, returning its stem.
     pub fn write_migration(
         &self,
         name: &str,
@@ -82,8 +90,8 @@ impl MigrationStore {
 
         let version = self.next_version()?;
         let stem = format!("{version:04}_{}", slugify(name));
-        std::fs::write(self.directory.join(format!("{stem}.up.sql")), render(up))?;
-        std::fs::write(self.directory.join(format!("{stem}.down.sql")), render(down))?;
+        std::fs::write(self.directory.join(format!("{stem}.up.sql")), script(up))?;
+        std::fs::write(self.directory.join(format!("{stem}.down.sql")), script(down))?;
         save_snapshot(&self.snapshot_path(version), snapshot)?;
         Ok(stem)
     }
