@@ -67,10 +67,13 @@ pub fn export_validators(out_dir: &str, backend: &dyn ValidatorBackend) -> anyho
     schemas.sort_by_key(|s| s.name);
 
     let mut out = backend.header();
-    for schema in &schemas {
-        out.push_str(&backend.schema(schema));
-        out.push('\n');
-    }
+    let body = schemas
+        .iter()
+        .map(|schema| backend.schema(schema))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    out.push_str(&body);
+    out.push('\n');
 
     let file = Path::new(out_dir).join(backend.file_name());
     if let Some(parent) = file.parent() {

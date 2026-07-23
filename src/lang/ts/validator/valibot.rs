@@ -15,14 +15,18 @@ impl ValidatorBackend for Valibot {
     }
 
     fn schema(&self, schema: &ValidatorSchema) -> String {
+        if schema.fields.is_empty() {
+            return format!("export const {}Schema = v.object({{}});", schema.name);
+        }
+
         let fields = schema
             .fields
             .iter()
-            .map(|f| format!("{}: {}", f.name, field(f)))
+            .map(|f| format!("  {}: {},", f.name, field(f)))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join("\n");
 
-        format!("export const {}Schema = v.object({{ {fields} }});", schema.name)
+        format!("export const {}Schema = v.object({{\n{fields}\n}});", schema.name)
     }
 }
 

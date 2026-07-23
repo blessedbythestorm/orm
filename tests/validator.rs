@@ -23,8 +23,7 @@ fn pipes_a_base_type_with_its_rules() {
 
     assert_eq!(
         out,
-        "export const SignupSchema = v.object({ email: v.pipe(v.string(), v.email()), \
-         age: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(120))) });"
+        "export const SignupSchema = v.object({\n  email: v.pipe(v.string(), v.email()),\n  age: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(120))),\n});"
     );
 }
 
@@ -40,8 +39,7 @@ fn uuid_and_timestamp_carry_intrinsic_rules() {
 
     assert_eq!(
         out,
-        "export const RowSchema = v.object({ id: v.pipe(v.string(), v.uuid()), \
-         at: v.pipe(v.string(), v.isoTimestamp()) });"
+        "export const RowSchema = v.object({\n  id: v.pipe(v.string(), v.uuid()),\n  at: v.pipe(v.string(), v.isoTimestamp()),\n});"
     );
 }
 
@@ -52,7 +50,7 @@ fn array_wraps_the_base_type() {
         &[Field { name: "tags", base: BaseType::String, rules: &[], optional: false, array: true }],
     );
 
-    assert_eq!(out, "export const PostSchema = v.object({ tags: v.array(v.string()) });");
+    assert_eq!(out, "export const PostSchema = v.object({\n  tags: v.array(v.string()),\n});");
 }
 
 #[test]
@@ -70,7 +68,7 @@ fn regex_rule_escapes_into_a_js_regexp() {
 
     assert_eq!(
         out,
-        "export const ContactSchema = v.object({ phone: v.pipe(v.string(), v.regex(new RegExp(\"^\\\\+\\\\d+$\"))) });"
+        "export const ContactSchema = v.object({\n  phone: v.pipe(v.string(), v.regex(new RegExp(\"^\\\\+\\\\d+$\"))),\n});"
     );
 }
 
