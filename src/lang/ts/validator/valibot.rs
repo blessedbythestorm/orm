@@ -1,3 +1,4 @@
+use crate::export::{ExportType, Shape};
 use crate::validator::{BaseType, Field, Rule, ValidatorBackend, ValidatorSchema};
 
 /// Emits [valibot](https://valibot.dev) schemas.
@@ -37,7 +38,7 @@ fn field(f: &Field) -> String {
 
     let base = base(&f.base);
     let mut expr = match pipe.is_empty() {
-        true => base.to_string(),
+        true => base,
         false => format!("v.pipe({base}, {})", pipe.join(", ")),
     };
 
@@ -50,12 +51,38 @@ fn field(f: &Field) -> String {
     expr
 }
 
-fn base(base: &BaseType) -> &'static str {
+fn base(base: &BaseType) -> String {
     match base {
-        BaseType::Bool => "v.boolean()",
-        BaseType::Number => "v.number()",
-        BaseType::String | BaseType::Timestamp | BaseType::Uuid => "v.string()",
-        BaseType::Unknown => "v.unknown()",
+        BaseType::Bool => "v.boolean()".into(),
+        BaseType::Number => "v.number()".into(),
+        BaseType::String | BaseType::Timestamp | BaseType::Uuid => "v.string()".into(),
+        BaseType::Named(name) => named(name),
+        BaseType::Unknown => "v.unknown()".into(),
+    }
+}
+
+/// A named type resolved against the export registry: an enum renders as a
+/// picklist of its wire values — the same values its exported TS union carries,
+/// so the two can't drift — and anything else stays unknown.
+fn named(name: &str) -> String {
+    let variants = inventory::iter::<ExportType>
+        .into_iter()
+        .find(|export| export.name == name)
+        .and_then(|export| match export.shape {
+            Shape::Enum(variants) => Some(variants),
+            Shape::Struct(_) => None,
+        });
+
+    match variants {
+        Some(variants) => {
+            let values = variants
+                .iter()
+                .map(|variant| format!("\"{variant}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("v.picklist([{values}])")
+        }
+        None => "v.unknown()".into(),
     }
 }
 

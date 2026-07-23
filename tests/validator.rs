@@ -73,3 +73,32 @@ fn regex_rule_escapes_into_a_js_regexp() {
         "export const ContactSchema = v.object({ phone: v.pipe(v.string(), v.regex(new RegExp(\"^\\\\+\\\\d+$\"))) });"
     );
 }
+
+inventory::submit! {
+    orm::export::ExportType {
+        name: "TestStatus",
+        path: "types/test.ts",
+        docs: &[],
+        shape: orm::export::Shape::Enum(&["live", "ended"]),
+    }
+}
+
+#[test]
+fn named_enum_renders_as_a_picklist_of_its_wire_values() {
+    let out = render(
+        "SetStatus",
+        &[Field { name: "status", base: BaseType::Named("TestStatus"), rules: &[], optional: false, array: false }],
+    );
+
+    assert!(out.contains("status: v.picklist([\"live\", \"ended\"])"), "{out}");
+}
+
+#[test]
+fn unregistered_named_type_stays_unknown() {
+    let out = render(
+        "SetThing",
+        &[Field { name: "thing", base: BaseType::Named("NotRegistered"), rules: &[], optional: true, array: false }],
+    );
+
+    assert!(out.contains("thing: v.optional(v.unknown())"), "{out}");
+}

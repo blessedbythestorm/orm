@@ -64,7 +64,11 @@ fn base_type(ty: &Type) -> (TokenStream, bool, bool) {
         ) => quote! { ::orm::validator::BaseType::Number },
         Some("Uuid") => quote! { ::orm::validator::BaseType::Uuid },
         Some("DateTime") => quote! { ::orm::validator::BaseType::Timestamp },
-        _ => quote! { ::orm::validator::BaseType::Unknown },
+        Some(other) => {
+            let named = other.to_string();
+            quote! { ::orm::validator::BaseType::Named(#named) }
+        }
+        None => quote! { ::orm::validator::BaseType::Unknown },
     };
     (base, false, false)
 }

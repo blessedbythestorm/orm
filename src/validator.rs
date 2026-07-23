@@ -12,6 +12,9 @@ pub enum BaseType {
     String,
     Timestamp,
     Uuid,
+    /// A reference to another exported type by name; enums render as their
+    /// closed value set so schemas and exported unions can't drift.
+    Named(&'static str),
     Unknown,
 }
 
