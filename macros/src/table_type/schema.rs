@@ -1,12 +1,16 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use super::parse::{FieldDef, ForeignKeySpec, TableDef};
+use super::parse::{
+    ConstraintKindSpec, ConstraintSpec, FieldDef, ForeignKeySpec, IndexSpec, TableDef,
+};
 
 pub fn generate(table: &TableDef) -> TokenStream {
     let schema = &table.config.schema;
     let name = &table.config.table;
     let columns = table.fields.iter().map(column_item);
+    let constraints = table.constraints.iter().map(constraint_item);
+    let indexes = table.indexes.iter().map(index_item);
 
     quote! {
         inventory::submit! {
@@ -14,7 +18,47 @@ pub fn generate(table: &TableDef) -> TokenStream {
                 schema: #schema,
                 name: #name,
                 columns: &[ #(#columns),* ],
+                constraints: &[ #(#constraints),* ],
+                indexes: &[ #(#indexes),* ],
             }
+        }
+    }
+}
+
+fn constraint_item(spec: &ConstraintSpec) -> TokenStream {
+    let name = &spec.name;
+    let kind = match &spec.kind {
+        ConstraintKindSpec::Unique { columns } => {
+            let columns = columns.iter().map(String::as_str);
+            quote! {
+                ::orm::schema::registry::ConstraintKindItem::Unique { columns: &[ #(#columns),* ] }
+            }
+        }
+        ConstraintKindSpec::Check { expression } => quote! {
+            ::orm::schema::registry::ConstraintKindItem::Check { expression: #expression }
+        },
+    };
+
+    quote! {
+        ::orm::schema::registry::ConstraintItem { name: #name, kind: #kind }
+    }
+}
+
+fn index_item(spec: &IndexSpec) -> TokenStream {
+    let name = &spec.name;
+    let columns = spec.columns.iter().map(String::as_str);
+    let unique = spec.unique;
+    let predicate = match &spec.predicate {
+        Some(value) => quote! { Some(#value) },
+        None => quote! { None },
+    };
+
+    quote! {
+        ::orm::schema::registry::IndexItem {
+            name: #name,
+            columns: &[ #(#columns),* ],
+            unique: #unique,
+            predicate: #predicate,
         }
     }
 }

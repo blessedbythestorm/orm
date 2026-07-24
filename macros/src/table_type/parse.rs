@@ -10,6 +10,27 @@ pub struct TableDef {
     pub name_snake: String,
     pub fields: Vec<FieldDef>,
     pub config: TableConfig,
+    pub constraints: Vec<ConstraintSpec>,
+    pub indexes: Vec<IndexSpec>,
+}
+
+/// A table-level constraint declared by `#[table(unique(...), check(...))]`, or
+/// a single-column check lifted from a field's `#[pg(check("..."))]`.
+pub struct ConstraintSpec {
+    pub name: String,
+    pub kind: ConstraintKindSpec,
+}
+
+pub enum ConstraintKindSpec {
+    Unique { columns: Vec<String> },
+    Check { expression: String },
+}
+
+pub struct IndexSpec {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub predicate: Option<String>,
 }
 
 pub struct FieldDef {
@@ -24,6 +45,7 @@ pub struct FieldDef {
     pub is_unique: bool,
     pub default: Option<String>,
     pub foreign_key: Option<ForeignKeySpec>,
+    pub check: Option<String>,
 }
 
 pub struct ForeignKeySpec {
@@ -66,12 +88,28 @@ impl TableDef {
         let name_snake = name.to_string().to_snake_case();
         let config = TableConfig::parse(&input.attrs);
 
-        let fields = match &input.fields {
+        let fields: Vec<FieldDef> = match &input.fields {
             Fields::Named(fields) => fields.named.iter().map(FieldDef::parse).collect(),
             _ => panic!("TableType only supports structs with named fields"),
         };
 
-        Self { name, name_snake, fields, config }
+        let table = TableSpec::parse(&input.attrs, &config.table);
+
+        // A field's own `#[pg(check(...))]` is just a one-column table check;
+        // naming it after the column keeps the diff key stable.
+        let mut constraints = table.constraints;
+        for field in &fields {
+            let Some(expression) = &field.check else {
+                continue;
+            };
+
+            constraints.push(ConstraintSpec {
+                name: format!("{}_{}_check", config.table, field.name_str),
+                kind: ConstraintKindSpec::Check { expression: expression.clone() },
+            });
+        }
+
+        Self { name, name_snake, fields, config, constraints, indexes: table.indexes }
     }
 
     pub fn export_path(&self) -> &str {
@@ -123,6 +161,7 @@ impl FieldDef {
             is_unique: pg.unique,
             default: pg.default,
             foreign_key: pg.foreign,
+            check: pg.check,
         }
     }
 
@@ -173,13 +212,14 @@ impl TableConfig {
     }
 }
 
-/// Storage metadata from `#[pg(primary, unique, default(...), foreign(...))]`.
+/// Storage metadata from `#[pg(primary, unique, check("..."), default(...), foreign(...))]`.
 #[derive(Default)]
 struct PgSpec {
     primary: bool,
     unique: bool,
     default: Option<String>,
     foreign: Option<ForeignKeySpec>,
+    check: Option<String>,
 }
 
 impl PgSpec {
@@ -205,6 +245,11 @@ impl PgSpec {
                         parenthesized!(content in input);
                         spec.foreign = Some(parse_foreign_value(&content)?);
                     }
+                    "check" => {
+                        let content;
+                        parenthesized!(content in input);
+                        spec.check = Some(content.parse::<LitStr>()?.value());
+                    }
                     other => return Err(syn::Error::new(key.span(), format!("unknown pg option `{other}`"))),
                 }
                 if input.peek(Token![,]) {
@@ -216,6 +261,139 @@ impl PgSpec {
 
         spec
     }
+}
+
+/// Table-level storage rules from
+/// `#[table(unique(a, b), check(name = "expr"), index(a, b), index(unique, a, where = "expr"))]`.
+///
+/// Constraint and index names are the diff keys, so an unnamed entry gets a
+/// deterministic one derived from the table and its columns — the same name
+/// Postgres would choose, which keeps a declared rule and an introspected one
+/// comparing equal.
+#[derive(Default)]
+struct TableSpec {
+    constraints: Vec<ConstraintSpec>,
+    indexes: Vec<IndexSpec>,
+}
+
+impl TableSpec {
+    fn parse(attrs: &[Attribute], table: &str) -> Self {
+        let mut spec = Self::default();
+
+        for attr in attrs.iter().filter(|attr| attr.path().is_ident("table")) {
+            let result = attr.parse_args_with(|input: ParseStream| {
+                while !input.is_empty() {
+                    let key: Ident = input.parse()?;
+                    let content;
+                    parenthesized!(content in input);
+
+                    match key.to_string().as_str() {
+                        "unique" => spec.constraints.push(parse_unique(&content, table)?),
+                        "check" => spec.constraints.push(parse_check(&content, table)?),
+                        "index" => spec.indexes.push(parse_index(&content, table)?),
+                        other => {
+                            return Err(syn::Error::new(
+                                key.span(),
+                                format!("unknown table option `{other}`; expected unique, check, or index"),
+                            ));
+                        }
+                    }
+
+                    if input.peek(Token![,]) {
+                        input.parse::<Token![,]>()?;
+                    }
+                }
+                Ok(())
+            });
+
+            if let Err(error) = result {
+                panic!("{error}");
+            }
+        }
+
+        spec
+    }
+}
+
+/// `unique(a, b)` — Postgres names a unique key `<table>_<cols>_key`.
+fn parse_unique(input: ParseStream, table: &str) -> syn::Result<ConstraintSpec> {
+    let columns = parse_column_list(input)?;
+
+    if columns.is_empty() {
+        return Err(input.error("unique expects at least one column"));
+    }
+
+    Ok(ConstraintSpec {
+        name: format!("{table}_{}_key", columns.join("_")),
+        kind: ConstraintKindSpec::Unique { columns },
+    })
+}
+
+/// `check(positive_weight = "current_kg >= 0")` — the ident names the rule so
+/// the constraint has a stable, readable identity in errors and in the diff.
+fn parse_check(input: ParseStream, table: &str) -> syn::Result<ConstraintSpec> {
+    let label: Ident = input.parse()?;
+    input.parse::<Token![=]>()?;
+    let expression = input.parse::<LitStr>()?.value();
+
+    Ok(ConstraintSpec {
+        name: format!("{table}_{label}_check"),
+        kind: ConstraintKindSpec::Check { expression },
+    })
+}
+
+/// `index(a, b)`, `index(unique, a)`, `index(a, where = "expr")`.
+fn parse_index(input: ParseStream, table: &str) -> syn::Result<IndexSpec> {
+    let mut unique = false;
+    let mut columns = Vec::new();
+    let mut predicate = None;
+
+    while !input.is_empty() {
+        if input.peek(Token![where]) {
+            input.parse::<Token![where]>()?;
+            input.parse::<Token![=]>()?;
+            predicate = Some(input.parse::<LitStr>()?.value());
+        } else {
+            let ident: Ident = input.parse()?;
+
+            if ident == "unique" {
+                unique = true;
+            } else {
+                columns.push(ident.to_string());
+            }
+        }
+
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        }
+    }
+
+    if columns.is_empty() {
+        return Err(input.error("index expects at least one column"));
+    }
+
+    let suffix = if predicate.is_some() { "partial_idx" } else { "idx" };
+
+    Ok(IndexSpec {
+        name: format!("{table}_{}_{suffix}", columns.join("_")),
+        columns,
+        unique,
+        predicate,
+    })
+}
+
+fn parse_column_list(input: ParseStream) -> syn::Result<Vec<String>> {
+    let mut columns = Vec::new();
+
+    while !input.is_empty() {
+        columns.push(input.parse::<Ident>()?.to_string());
+
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        }
+    }
+
+    Ok(columns)
 }
 
 /// CRUD-struct shaping from `#[crud(insert(optional), insert(skip), update(skip))]`.

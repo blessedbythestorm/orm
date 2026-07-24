@@ -156,7 +156,8 @@ pub fn diff_live(
     block_on(async move {
         let desired = assemble_desired_schema();
         let db = Database::connect(&url).await?;
-        let current = db.introspect(&owned_schemas(&desired)).await?;
+        let mut current = db.introspect(&owned_schemas(&desired)).await?;
+        adopt_matching_expressions(&mut current, &desired);
 
         // Same resolver as `generate`, so a renamed column is offered as a rename
         // (data-preserving) instead of a destructive drop + add.
@@ -236,6 +237,50 @@ pub fn status(directory: &Path, database_url: Option<String>) -> anyhow::Result<
 /// data-preserving renames: interactive prompts, or always-no when scripted.
 fn resolver(interactive: bool) -> Box<dyn RenameResolver> {
     if interactive { Box::new(Prompt) } else { Box::new(NoRenames) }
+}
+
+/// Copies the declared text of check constraints and index predicates onto the
+/// introspected schema wherever the two agree on name and shape.
+///
+/// Postgres rewrites an expression when it stores it — `current_kg >= 0` comes
+/// back as `current_kg >= (0)::double precision` — so comparing the declared
+/// text against the catalog's would report drift on every run and never
+/// converge. Names are the identity here; a real change to an expression is
+/// made under a new name or by dropping the old rule. Only `diff_live` needs
+/// this: `generate` diffs against our own snapshot, where the text round-trips.
+fn adopt_matching_expressions(current: &mut DatabaseSchema, desired: &DatabaseSchema) {
+    use crate::schema::{ConstraintKind, Table};
+
+    for (name, current_table) in current.tables.iter_mut() {
+        let Some(desired_table): Option<&Table> = desired.tables.get(name) else {
+            continue;
+        };
+
+        for constraint in current_table.constraints.iter_mut() {
+            let ConstraintKind::Check { .. } = constraint.kind else {
+                continue;
+            };
+
+            let Some(declared) = desired_table.constraint(&constraint.name) else {
+                continue;
+            };
+
+            if matches!(declared.kind, ConstraintKind::Check { .. }) {
+                constraint.kind = declared.kind.clone();
+            }
+        }
+
+        for index in current_table.indexes.iter_mut() {
+            let Some(declared) = desired_table.index(&index.name) else {
+                continue;
+            };
+
+            if index.predicate.is_some() && declared.predicate.is_some() && index.columns == declared.columns
+            {
+                index.predicate = declared.predicate.clone();
+            }
+        }
+    }
 }
 
 /// The distinct schemas the Rust types live in — the set we introspect and diff,

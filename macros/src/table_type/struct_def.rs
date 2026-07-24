@@ -9,7 +9,12 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
     let name = &table.name;
     let export_path = table.export_path();
 
-    let user_attrs: Vec<_> = input.attrs.iter().filter(|a| !a.path().is_ident("table_type")).collect();
+    let struct_helpers = ["table_type", "table"];
+    let user_attrs: Vec<_> = input
+        .attrs
+        .iter()
+        .filter(|a| !struct_helpers.iter().any(|helper| a.path().is_ident(helper)))
+        .collect();
 
     let helper_attrs = ["pg", "crud", "api"];
     let fields: Vec<_> = input

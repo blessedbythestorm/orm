@@ -18,11 +18,19 @@ pub struct EnumType {
     pub values: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Table {
     pub schema: String,
     pub name: String,
     pub columns: Vec<Column>,
+    /// Table-level constraints: multi-column uniques and checks. Single-column
+    /// uniques stay on their [`Column`]; everything else lives here.
+    #[serde(default)]
+    pub constraints: Vec<Constraint>,
+    /// Standalone indexes — including the partial and expression indexes a
+    /// constraint cannot express.
+    #[serde(default)]
+    pub indexes: Vec<Index>,
 }
 
 impl Table {
@@ -37,6 +45,48 @@ impl Table {
     pub fn column(&self, name: &str) -> Option<&Column> {
         self.columns.iter().find(|column| column.name == name)
     }
+
+    pub fn constraint(&self, name: &str) -> Option<&Constraint> {
+        self.constraints.iter().find(|constraint| constraint.name == name)
+    }
+
+    pub fn index(&self, name: &str) -> Option<&Index> {
+        self.indexes.iter().find(|index| index.name == name)
+    }
+}
+
+/// A named table-level constraint. The name is the diff key, so it must be
+/// stable: the macros derive it from the table and columns when not given one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Constraint {
+    pub name: String,
+    pub kind: ConstraintKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConstraintKind {
+    Unique { columns: Vec<String> },
+    Check { expression: String },
+}
+
+impl Constraint {
+    /// The body of the `ADD CONSTRAINT <name> …` clause.
+    pub fn definition(&self) -> String {
+        match &self.kind {
+            ConstraintKind::Unique { columns } => format!("UNIQUE ({})", columns.join(", ")),
+            ConstraintKind::Check { expression } => format!("CHECK ({expression})"),
+        }
+    }
+}
+
+/// A standalone index. `predicate` makes it partial; `unique` makes it enforce
+/// uniqueness over just the rows the predicate selects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Index {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub predicate: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

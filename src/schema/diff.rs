@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use super::model::{Column, DatabaseSchema, EnumType, Table, TableReference, View, ViewReference};
+use super::model::{
+    Column, Constraint, ConstraintKind, DatabaseSchema, EnumType, Index, Table, TableReference, View,
+    ViewReference,
+};
 
 #[derive(Debug, Clone)]
 pub enum SchemaChange {
@@ -13,6 +16,7 @@ pub enum SchemaChange {
     DropTable(TableReference),
     RenameTable { table: TableReference, to: String },
     AlterColumn { table: TableReference, op: ColumnOp },
+    AlterTable { table: TableReference, op: TableOp },
     CreateView(View),
     DropView(ViewReference),
     Comment(String),
@@ -27,6 +31,17 @@ pub struct EnumDependent {
     pub column: String,
     pub nullable: bool,
     pub default: Option<String>,
+}
+
+/// A single constraint- or index-level operation, scoped to a table by
+/// [`SchemaChange::AlterTable`]. A redefinition is a drop followed by an add,
+/// since Postgres cannot alter either in place.
+#[derive(Debug, Clone)]
+pub enum TableOp {
+    AddConstraint(Constraint),
+    DropConstraint(String),
+    CreateIndex(Index),
+    DropIndex { schema: String, name: String },
 }
 
 /// A single column-level operation, scoped to a table by [`SchemaChange::AlterColumn`].
@@ -117,11 +132,22 @@ impl<'a> Differ<'a> {
         for (old_table, new_table) in &plan.renamed {
             self.emit(SchemaChange::RenameTable { table: old_table.reference(), to: new_table.name.clone() });
             self.diff_columns(old_table, new_table);
+            self.diff_constraints(old_table, new_table);
         }
 
         for desired_table in desired.tables.values() {
             if let Some(baseline_table) = baseline.tables.get(&desired_table.qualified_name()) {
                 self.diff_columns(baseline_table, desired_table);
+                self.diff_constraints(baseline_table, desired_table);
+            }
+        }
+
+        for table in order_by_dependencies(plan.created.clone()) {
+            for index in &table.indexes {
+                self.emit(SchemaChange::AlterTable {
+                    table: table.reference(),
+                    op: TableOp::CreateIndex(index.clone()),
+                });
             }
         }
 
@@ -136,6 +162,10 @@ impl<'a> Differ<'a> {
 
     fn alter_column(&mut self, table: &TableReference, op: ColumnOp) {
         self.emit(SchemaChange::AlterColumn { table: table.clone(), op });
+    }
+
+    fn alter_table(&mut self, table: &TableReference, op: TableOp) {
+        self.emit(SchemaChange::AlterTable { table: table.clone(), op });
     }
 
     fn diff_schemas(&mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema) {
@@ -260,8 +290,71 @@ impl<'a> Differ<'a> {
         }
     }
 
+    /// Diffs table-level constraints and indexes by name. Postgres cannot alter
+    /// either in place, so a changed definition becomes a drop and a re-add.
+    fn diff_constraints(&mut self, baseline_table: &Table, desired_table: &Table) {
+        let table = desired_table.reference();
+
+        for old in &baseline_table.constraints {
+            let survives = desired_table
+                .constraint(&old.name)
+                .is_some_and(|new| new.kind == old.kind);
+
+            if !survives {
+                self.alter_table(&table, TableOp::DropConstraint(old.name.clone()));
+            }
+        }
+
+        for new in &desired_table.constraints {
+            let unchanged = baseline_table
+                .constraint(&new.name)
+                .is_some_and(|old| old.kind == new.kind);
+
+            if !unchanged {
+                self.alter_table(&table, TableOp::AddConstraint(new.clone()));
+            }
+        }
+
+        for old in &baseline_table.indexes {
+            let survives = desired_table
+                .index(&old.name)
+                .is_some_and(|new| new == old);
+
+            if !survives {
+                let op = TableOp::DropIndex {
+                    schema: baseline_table.schema.clone(),
+                    name: old.name.clone(),
+                };
+                self.alter_table(&table, op);
+            }
+        }
+
+        for new in &desired_table.indexes {
+            let unchanged = baseline_table
+                .index(&new.name)
+                .is_some_and(|old| old == new);
+
+            if !unchanged {
+                self.alter_table(&table, TableOp::CreateIndex(new.clone()));
+            }
+        }
+    }
+
     fn diff_column_attributes(&mut self, table: &TableReference, old: &Column, new: &Column) {
         let column = new.name.clone();
+        if old.unique != new.unique {
+            let name = format!("{}_{column}_key", table.name);
+            let op = if new.unique {
+                TableOp::AddConstraint(Constraint {
+                    name,
+                    kind: ConstraintKind::Unique { columns: vec![column.clone()] },
+                })
+            } else {
+                TableOp::DropConstraint(name)
+            };
+
+            self.alter_table(table, op);
+        }
         if old.sql_type != new.sql_type {
             let using = self
                 .desired_enums
@@ -372,9 +465,45 @@ fn invert_one(change: &SchemaChange, baseline: &DatabaseSchema) -> SchemaChange 
             to: table.name.clone(),
         },
         AlterColumn { table, op } => invert_column(baseline, table, op),
+        AlterTable { table, op } => invert_table(baseline, table, op),
         CreateView(view) => DropView(view.reference()),
         DropView(view) => recreate_view(baseline, view),
     }
+}
+
+/// Undoes a constraint or index change, reading the dropped definition back out
+/// of the baseline so the down migration can recreate it exactly.
+fn invert_table(baseline: &DatabaseSchema, table: &TableReference, op: &TableOp) -> SchemaChange {
+    let baseline_table = baseline.tables.get(&table.qualified_name());
+
+    let inverted = match op {
+        TableOp::AddConstraint(constraint) => TableOp::DropConstraint(constraint.name.clone()),
+        TableOp::DropConstraint(name) => {
+            let Some(constraint) = baseline_table.and_then(|table| table.constraint(name)) else {
+                return SchemaChange::Comment(format!(
+                    "cannot recreate constraint {name} on {}: not in baseline",
+                    table.qualified_name()
+                ));
+            };
+
+            TableOp::AddConstraint(constraint.clone())
+        }
+        TableOp::CreateIndex(index) => {
+            TableOp::DropIndex { schema: table.schema.clone(), name: index.name.clone() }
+        }
+        TableOp::DropIndex { name, .. } => {
+            let Some(index) = baseline_table.and_then(|table| table.index(name)) else {
+                return SchemaChange::Comment(format!(
+                    "cannot recreate index {name} on {}: not in baseline",
+                    table.qualified_name()
+                ));
+            };
+
+            TableOp::CreateIndex(index.clone())
+        }
+    };
+
+    SchemaChange::AlterTable { table: table.clone(), op: inverted }
 }
 
 fn recreate_view(baseline: &DatabaseSchema, view: &ViewReference) -> SchemaChange {

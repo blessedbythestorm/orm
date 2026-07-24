@@ -1,7 +1,7 @@
 use std::fmt::{self, Display, Formatter};
 
-use super::diff::{ColumnOp, EnumDependent, SchemaChange};
-use super::model::{Column, EnumType, ForeignKey, Table};
+use super::diff::{ColumnOp, EnumDependent, SchemaChange, TableOp};
+use super::model::{Column, EnumType, ForeignKey, Index, Table};
 
 /// Renders an ordered list of schema changes into a single SQL migration script.
 pub fn render(changes: &[SchemaChange]) -> String {
@@ -26,6 +26,24 @@ impl Display for SchemaChange {
                 write!(f, "ALTER TABLE {} RENAME TO {to};", table.qualified_name())
             }
             Self::AlterColumn { table, op } => write!(f, "ALTER TABLE {} {op};", table.qualified_name()),
+            Self::AlterTable { table, op } => match op {
+                TableOp::CreateIndex(index) => {
+                    write!(f, "{}", create_index(&table.schema, &table.name, index))
+                }
+                TableOp::DropIndex { schema, name } => write!(f, "DROP INDEX IF EXISTS {schema}.{name};"),
+                TableOp::AddConstraint(constraint) => write!(
+                    f,
+                    "ALTER TABLE {} ADD CONSTRAINT {} {};",
+                    table.qualified_name(),
+                    constraint.name,
+                    constraint.definition(),
+                ),
+                TableOp::DropConstraint(name) => write!(
+                    f,
+                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {name};",
+                    table.qualified_name(),
+                ),
+            },
             Self::CreateView(view) => {
                 write!(f, "CREATE VIEW {} AS {};", view.qualified_name(), view.definition)
             }
@@ -175,7 +193,29 @@ fn create_table(table: &Table) -> String {
         entries.push(format!("PRIMARY KEY ({})", primary_key.join(", ")));
     }
 
+    for constraint in &table.constraints {
+        entries.push(format!("CONSTRAINT {} {}", constraint.name, constraint.definition()));
+    }
+
     format!("CREATE TABLE {} (\n    {}\n);", table.qualified_name(), entries.join(",\n    "))
+}
+
+/// A standalone index. Partial indexes carry their predicate; this is also how a
+/// uniqueness rule that only applies to some rows gets expressed.
+fn create_index(schema: &str, table: &str, index: &Index) -> String {
+    let unique = if index.unique { "UNIQUE " } else { "" };
+    let mut sql = format!(
+        "CREATE {unique}INDEX {} ON {schema}.{table} ({})",
+        index.name,
+        index.columns.join(", "),
+    );
+
+    if let Some(predicate) = &index.predicate {
+        sql.push_str(&format!(" WHERE {predicate}"));
+    }
+
+    sql.push(';');
+    sql
 }
 
 /// A column's definition for `CREATE TABLE` / `ADD COLUMN`, including an inline

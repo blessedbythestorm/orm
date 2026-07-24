@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use super::model::{Column, DatabaseSchema, EnumType, ForeignKey, ReferentialAction, Table, View};
+use super::model::{
+    Column, Constraint, ConstraintKind, DatabaseSchema, EnumType, ForeignKey, Index,
+    ReferentialAction, Table, View,
+};
 
 /// Compile-time schema entries submitted by the macros. These mirror the owned
 /// model types but use `&'static str` so they can live in `inventory` statics.
@@ -13,6 +16,27 @@ pub struct TableItem {
     pub schema: &'static str,
     pub name: &'static str,
     pub columns: &'static [ColumnItem],
+    pub constraints: &'static [ConstraintItem],
+    pub indexes: &'static [IndexItem],
+}
+
+/// A table-level constraint from `#[table(unique(...))]` / `#[table(check(...))]`
+/// or a field's `#[pg(check("..."))]`.
+pub struct ConstraintItem {
+    pub name: &'static str,
+    pub kind: ConstraintKindItem,
+}
+
+pub enum ConstraintKindItem {
+    Unique { columns: &'static [&'static str] },
+    Check { expression: &'static str },
+}
+
+pub struct IndexItem {
+    pub name: &'static str,
+    pub columns: &'static [&'static str],
+    pub unique: bool,
+    pub predicate: Option<&'static str>,
 }
 
 pub struct ColumnItem {
@@ -177,6 +201,8 @@ impl From<&TableItem> for Table {
             schema: item.schema.to_string(),
             name: item.name.to_string(),
             columns: item.columns.iter().map(Column::from).collect(),
+            constraints: item.constraints.iter().map(Constraint::from).collect(),
+            indexes: item.indexes.iter().map(Index::from).collect(),
         }
     }
 }
@@ -191,6 +217,32 @@ impl From<&ColumnItem> for Column {
             unique: item.unique,
             default: item.default.map(str::to_string),
             foreign_key: item.foreign_key.as_ref().map(ForeignKey::from),
+        }
+    }
+}
+
+impl From<&ConstraintItem> for Constraint {
+    fn from(item: &ConstraintItem) -> Self {
+        let kind = match &item.kind {
+            ConstraintKindItem::Unique { columns } => {
+                ConstraintKind::Unique { columns: columns.iter().map(|c| c.to_string()).collect() }
+            }
+            ConstraintKindItem::Check { expression } => {
+                ConstraintKind::Check { expression: expression.to_string() }
+            }
+        };
+
+        Constraint { name: item.name.to_string(), kind }
+    }
+}
+
+impl From<&IndexItem> for Index {
+    fn from(item: &IndexItem) -> Self {
+        Index {
+            name: item.name.to_string(),
+            columns: item.columns.iter().map(|c| c.to_string()).collect(),
+            unique: item.unique,
+            predicate: item.predicate.map(str::to_string),
         }
     }
 }

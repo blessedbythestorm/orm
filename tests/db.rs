@@ -46,6 +46,7 @@ fn desired_schema() -> DatabaseSchema {
             column("label", "text", false, false),
             column("count", "int4", true, false),
         ],
+        ..Default::default()
     };
 
     DatabaseSchema { tables: [(table.qualified_name(), table)].into_iter().collect(), ..Default::default() }

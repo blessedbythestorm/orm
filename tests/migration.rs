@@ -1,5 +1,6 @@
 use orm::schema::{
-    Column, DatabaseSchema, EnumType, ForeignKey, NoRenames, ReferentialAction, Table, diff, invert, render,
+    Column, Constraint, ConstraintKind, DatabaseSchema, EnumType, ForeignKey, Index, NoRenames,
+    ReferentialAction, Table, diff, invert, render,
 };
 
 fn col(name: &str, sql_type: &str) -> Column {
@@ -15,7 +16,18 @@ fn col(name: &str, sql_type: &str) -> Column {
 }
 
 fn table(name: &str, columns: Vec<Column>) -> Table {
-    Table { schema: "public".into(), name: name.into(), columns }
+    Table { schema: "public".into(), name: name.into(), columns, ..Default::default() }
+}
+
+fn unique(name: &str, columns: &[&str]) -> Constraint {
+    Constraint {
+        name: name.into(),
+        kind: ConstraintKind::Unique { columns: columns.iter().map(|c| c.to_string()).collect() },
+    }
+}
+
+fn check(name: &str, expression: &str) -> Constraint {
+    Constraint { name: name.into(), kind: ConstraintKind::Check { expression: expression.into() } }
 }
 
 fn schema(tables: Vec<Table>) -> DatabaseSchema {
@@ -238,4 +250,90 @@ fn invert_replace_enum_restores_the_old_values() {
     let down = render(&invert(&changes, &baseline));
     assert!(down.contains("CREATE TYPE public.status AS ENUM ('live', 'ended');"), "{down}");
     assert!(down.contains("DROP TYPE public.status_old;"), "{down}");
+}
+
+#[test]
+fn create_table_inlines_table_constraints() {
+    let mut widgets = table("widgets", vec![col("supplier_id", "uuid"), col("code", "text")]);
+    widgets.constraints = vec![
+        unique("widgets_supplier_id_code_key", &["supplier_id", "code"]),
+        check("widgets_positive_check", "weight_kg > 0"),
+    ];
+
+    let sql = up(&DatabaseSchema::default(), &schema(vec![widgets]));
+
+    assert!(
+        sql.contains("CONSTRAINT widgets_supplier_id_code_key UNIQUE (supplier_id, code)"),
+        "{sql}"
+    );
+    assert!(sql.contains("CONSTRAINT widgets_positive_check CHECK (weight_kg > 0)"), "{sql}");
+}
+
+#[test]
+fn adding_a_table_constraint_alters_the_table() {
+    let baseline = schema(vec![table("widgets", vec![col("code", "text")])]);
+    let mut widgets = table("widgets", vec![col("code", "text")]);
+    widgets.constraints = vec![check("widgets_positive_check", "weight_kg > 0")];
+
+    assert_eq!(
+        up(&baseline, &schema(vec![widgets])).trim(),
+        "ALTER TABLE public.widgets ADD CONSTRAINT widgets_positive_check CHECK (weight_kg > 0);"
+    );
+}
+
+#[test]
+fn changing_a_constraint_expression_drops_and_re_adds_it() {
+    let mut before = table("widgets", vec![col("code", "text")]);
+    before.constraints = vec![check("widgets_weight_check", "weight_kg > 0")];
+    let mut after = table("widgets", vec![col("code", "text")]);
+    after.constraints = vec![check("widgets_weight_check", "weight_kg >= 0")];
+
+    let sql = up(&schema(vec![before]), &schema(vec![after]));
+    let drop = sql.find("DROP CONSTRAINT IF EXISTS widgets_weight_check").expect("dropped");
+    let add = sql.find("ADD CONSTRAINT widgets_weight_check CHECK (weight_kg >= 0)").expect("re-added");
+
+    assert!(drop < add, "{sql}");
+}
+
+#[test]
+fn dropping_a_constraint_is_reversible() {
+    let mut before = table("widgets", vec![col("code", "text")]);
+    before.constraints = vec![unique("widgets_code_key2", &["code"])];
+    let baseline = schema(vec![before]);
+    let desired = schema(vec![table("widgets", vec![col("code", "text")])]);
+
+    let down = render(&invert(&diff(&baseline, &desired, &mut NoRenames), &baseline));
+    assert!(down.contains("ADD CONSTRAINT widgets_code_key2 UNIQUE (code);"), "{down}");
+}
+
+#[test]
+fn a_partial_unique_index_renders_its_predicate() {
+    let mut widgets = table("widgets", vec![col("coil_id", "uuid")]);
+    widgets.indexes = vec![Index {
+        name: "widgets_coil_id_partial_idx".into(),
+        columns: vec!["coil_id".into()],
+        unique: true,
+        predicate: Some("voided_at IS NULL".into()),
+    }];
+
+    let sql = up(&DatabaseSchema::default(), &schema(vec![widgets]));
+
+    assert!(
+        sql.contains(
+            "CREATE UNIQUE INDEX widgets_coil_id_partial_idx ON public.widgets (coil_id) \
+             WHERE voided_at IS NULL;"
+        ),
+        "{sql}"
+    );
+}
+
+#[test]
+fn dropping_a_column_level_unique_is_no_longer_silent() {
+    let baseline = schema(vec![table("inks", vec![Column { unique: true, ..col("vendor_code", "text") }])]);
+    let desired = schema(vec![table("inks", vec![col("vendor_code", "text")])]);
+
+    assert_eq!(
+        up(&baseline, &desired).trim(),
+        "ALTER TABLE public.inks DROP CONSTRAINT IF EXISTS inks_vendor_code_key;"
+    );
 }
