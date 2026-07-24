@@ -15,10 +15,12 @@ use crate::export::{ExportBackend, FieldType};
 use crate::registry::EndpointMeta;
 use crate::validator::ValidatorSchema;
 
-/// The referenced type's name, if it's a named export (vs a builtin like `Json`).
+/// The referenced type's name, if it's a named export (vs a builtin like
+/// `Json`), looking through `Array` so `Vec<T>` responses import `T` too.
 fn named(ty: &FieldType) -> Option<&'static str> {
     match ty {
         FieldType::Named(name) => Some(*name),
+        FieldType::Array(inner) => named(inner),
         _ => None,
     }
 }
