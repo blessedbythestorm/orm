@@ -93,7 +93,8 @@ impl TableDef {
             _ => panic!("TableType only supports structs with named fields"),
         };
 
-        let table = TableSpec::parse(&input.attrs, &config.table);
+        let mut table = TableSpec::parse(&input.attrs, &config.table);
+        table.assert_names_fit();
 
         // A field's own `#[pg(check(...))]` is just a one-column table check;
         // naming it after the column keeps the diff key stable.
@@ -276,7 +277,34 @@ struct TableSpec {
     indexes: Vec<IndexSpec>,
 }
 
+/// Postgres' identifier limit. A longer name is silently truncated on the way
+/// in, so the stored name stops matching the declared one and every diff
+/// reports the same phantom change forever.
+const MAX_IDENTIFIER_BYTES: usize = 63;
+
 impl TableSpec {
+    /// Fails the build on a constraint or index name Postgres would truncate.
+    fn assert_names_fit(&self) {
+        let names = self
+            .constraints
+            .iter()
+            .map(|constraint| &constraint.name)
+            .chain(self.indexes.iter().map(|index| &index.name));
+
+        for name in names {
+            if name.len() <= MAX_IDENTIFIER_BYTES {
+                continue;
+            }
+
+            panic!(
+                "constraint/index name `{name}` is {} bytes; Postgres truncates at \
+                 {MAX_IDENTIFIER_BYTES}, which would make every diff report it as changed. \
+                 Shorten the rule label.",
+                name.len(),
+            );
+        }
+    }
+
     fn parse(attrs: &[Attribute], table: &str) -> Self {
         let mut spec = Self::default();
 
