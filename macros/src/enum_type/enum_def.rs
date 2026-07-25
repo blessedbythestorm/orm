@@ -34,7 +34,9 @@ pub fn generate(def: &EnumDef, input: &ItemEnum) -> TokenStream {
         .collect();
 
     quote! {
-        #[derive(Debug, Clone, PartialEq, Eq)]
+        // Every variant is a unit, so `Copy` always holds and spares callers a
+        // clone to read a value that is one tag wide.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #(#user_attrs)*
         #vis enum #name {
             #variants
