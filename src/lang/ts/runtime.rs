@@ -25,24 +25,15 @@ export interface ApiError {
 pub(super) const REQUEST_HELPER: &str = r#"  const base = (config.baseUrl ?? "").replace(/\/$/, "");
   const fetchImpl = config.fetch ?? fetch;
 
-  async function request<T>(
+  /// Performs the call and interprets the response. Shared by every transport so
+  /// the error shape cannot drift between them.
+  async function dispatch<T>(
     method: string,
     path: string,
-    body?: unknown,
+    init: RequestInit,
   ): Promise<Result<T, ApiError>> {
-    const headers: Record<string, string> = { ...config.headers };
-
-    if (body !== undefined) {
-      headers["Content-Type"] = "application/json";
-    }
-
     const response = await result(() =>
-      fetchImpl(base + path, {
-        method,
-        credentials: "include",
-        headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      }),
+      fetchImpl(base + path, { method, credentials: "include", ...init }),
     );
 
     if (response.err) {
@@ -73,6 +64,41 @@ pub(super) const REQUEST_HELPER: &str = r#"  const base = (config.baseUrl ?? "")
     const text = await res.text();
 
     return ok(text ? (JSON.parse(text) as T) : (undefined as T));
+  }
+
+  async function request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Result<T, ApiError>> {
+    const headers: Record<string, string> = { ...config.headers };
+
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+    }
+
+    return dispatch<T>(method, path, {
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  /// Sends a file with any accompanying text fields. No content type is set: the
+  /// browser has to supply the multipart boundary itself.
+  async function upload<T>(
+    method: string,
+    path: string,
+    file: File,
+    fields?: Record<string, string>,
+  ): Promise<Result<T, ApiError>> {
+    const form = new FormData();
+    form.append("file", file);
+
+    for (const [name, value] of Object.entries(fields ?? {})) {
+      form.append(name, value);
+    }
+
+    return dispatch<T>(method, path, { headers: { ...config.headers }, body: form });
   }
 "#;
 

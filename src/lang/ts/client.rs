@@ -199,7 +199,12 @@ fn render_method(endpoint: &EndpointMeta, validated: Option<&str>) -> String {
         .map(|p| format!("{p}: string"))
         .collect();
 
-    if let Some(request) = &endpoint.request {
+    if endpoint.upload {
+        // A file, plus whatever text fields the handler reads alongside it. The
+        // fields stay loose because they are form values, not a typed body.
+        args.push("file: File".to_string());
+        args.push("fields?: Record<string, string>".to_string());
+    } else if let Some(request) = &endpoint.request {
         args.push(format!("body: {}", TypeScript.type_expr(request.ty)));
     }
     if !endpoint.queries.is_empty() {
@@ -224,6 +229,7 @@ fn render_method(endpoint: &EndpointMeta, validated: Option<&str>) -> String {
     let signature = format!("({}): Promise<Result<{returns}, ApiError>> =>", args.join(", "));
 
     let call = match validated {
+        _ if endpoint.upload => format!("upload<{returns}>(\"{method}\", {url}, file, fields)"),
         Some(schema) => format!("send<{returns}>(\"{method}\", {url}, {schema}, body)"),
         None if endpoint.request.is_some() => format!("request<{returns}>(\"{method}\", {url}, body)"),
         None => format!("request<{returns}>(\"{method}\", {url})"),

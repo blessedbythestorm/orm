@@ -18,6 +18,10 @@ pub struct EndpointMeta {
     pub request: Option<TypeRef>,
     pub queries: &'static [TypeRef],
     pub response: Option<TypeRef>,
+    /// The handler takes a `Multipart` body: a file, plus any number of text
+    /// fields. Generated clients send `FormData` and set no content type, so the
+    /// browser can supply the boundary.
+    pub upload: bool,
 }
 
 inventory::collect!(EndpointMeta);

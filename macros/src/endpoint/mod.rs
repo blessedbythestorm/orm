@@ -47,6 +47,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     // (Pagination, Sort, Search) and the client types their intersection.
     let mut request_ty: Option<Type> = None;
     let mut query_tys: Vec<Type> = Vec::new();
+    let mut upload = false;
     for input in &func.sig.inputs {
         if let FnArg::Typed(arg) = input {
             if request_ty.is_none() {
@@ -54,6 +55,9 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
             if let Some(query) = extract_wrapped(&arg.ty, "Query") {
                 query_tys.push(query);
+            }
+            if is_named(&arg.ty, "Multipart") {
+                upload = true;
             }
         }
     }
@@ -79,9 +83,23 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 request: #request,
                 queries: &[#(#queries),*],
                 response: #response,
+                upload: #upload,
             }
         }
     }
+}
+
+/// Whether a type's final path segment is `name` — enough to spot the
+/// `Multipart` extractor without caring how it was imported.
+fn is_named(ty: &Type, name: &str) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == name)
 }
 
 fn type_ref(ty: Option<&Type>) -> TokenStream {
