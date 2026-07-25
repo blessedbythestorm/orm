@@ -36,8 +36,13 @@ impl ExportBackend for TypeScript {
         let body: String = fields
             .iter()
             .map(|f| {
-                let optional = if f.optional { "?" } else { "" };
-                format!("{}{optional}: {}, ", f.name, self.type_expr(f.ty))
+                // An `Option<T>` field is both omittable on the way in and
+                // `null` on the way out — serde writes JSON null for `None`. The
+                // type has to admit null or every consumer's `=== undefined`
+                // check compiles while failing at runtime.
+                let (optional, null) = if f.optional { ("?", " | null") } else { ("", "") };
+
+                format!("{}{optional}: {}{null}, ", f.name, self.type_expr(f.ty))
             })
             .collect();
         format!("{docs}export type {name} = {{ {body}}};")

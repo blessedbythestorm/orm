@@ -29,9 +29,12 @@ fn struct_decl_renders_fields_and_optionals() {
         Field { name: "note", ty: &FieldType::String, optional: true },
     ];
 
+    // An optional field admits null as well as absence: serde serialises `None`
+    // as JSON null, so a consumer checking only for `undefined` would compile
+    // and then fail on real data.
     assert_eq!(
         TypeScript.struct_decl("Doc", "", &fields),
-        "export type Doc = { id: string, note?: string, };"
+        "export type Doc = { id: string, note?: string | null, };"
     );
 }
 
