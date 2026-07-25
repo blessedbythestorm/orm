@@ -1,3 +1,4 @@
+use heck::ToSnakeCase;
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Item;
@@ -54,7 +55,19 @@ fn generate_enum(input: &syn::ItemEnum, export_to: &str) -> TokenStream {
     let user_attrs: Vec<_> = input.attrs.iter().filter(|a| !a.path().is_ident("api_type")).collect();
 
     let doc = crate::export::doc_lines(&input.attrs);
-    let variant_names: Vec<String> = variants.iter().map(|v| v.ident.to_string()).collect();
+
+    // Export the names serde actually writes. Exporting the Rust idents while
+    // `rename_all` rewrites the wire values produces a union that type-checks and
+    // never matches anything that arrives.
+    let snake = has_snake_case_rename(&input.attrs);
+    let variant_names: Vec<String> = variants
+        .iter()
+        .map(|v| match snake {
+            true => v.ident.to_string().to_snake_case(),
+            false => v.ident.to_string(),
+        })
+        .collect();
+
     let ts_export = crate::export::enum_export(&name.to_string(), export_to, &doc, &variant_names);
 
     quote! {
@@ -66,4 +79,27 @@ fn generate_enum(input: &syn::ItemEnum, export_to: &str) -> TokenStream {
 
         #ts_export
     }
+}
+
+/// Whether the item carries `#[serde(rename_all = "snake_case")]`.
+fn has_snake_case_rename(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("serde") {
+            return false;
+        }
+
+        let mut found = false;
+
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename_all")
+                && let Ok(syn::Lit::Str(value)) = meta.value()?.parse::<syn::Lit>()
+            {
+                found = value.value() == "snake_case";
+            }
+
+            Ok(())
+        });
+
+        found
+    })
 }
