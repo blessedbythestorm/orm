@@ -55,6 +55,15 @@ pub fn field_type(ty: &Type) -> (TokenStream, bool) {
         return (quote! { &::orm::export::FieldType::Array(#inner_ty) }, false);
     }
 
+    // A map's value type is what crosses the boundary; the key is a string by
+    // construction, since that is all serde can write as a JSON object key.
+    for map in ["BTreeMap", "HashMap"] {
+        if let Some(value) = generic_value(ty, map) {
+            let (value_ty, _) = field_type(&value);
+            return (quote! { &::orm::export::FieldType::Map(#value_ty) }, false);
+        }
+    }
+
     let ident = last_ident(ty);
     let variant = match ident.as_deref() {
         Some("String" | "str") => quote! { &::orm::export::FieldType::String },
@@ -70,6 +79,31 @@ pub fn field_type(ty: &Type) -> (TokenStream, bool) {
         None => quote! { &::orm::export::FieldType::Json },
     };
     (variant, false)
+}
+
+/// The second generic argument of `Wrapper<K, V>`, if `ty` is one.
+fn generic_value(ty: &Type, wrapper: &str) -> Option<Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+
+    let segment = path.path.segments.last()?;
+
+    if segment.ident != wrapper {
+        return None;
+    }
+
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+
+    args.args
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty.clone()),
+            _ => None,
+        })
+        .nth(1)
 }
 
 /// The named fields of a struct as [`Field`]s (none forced optional).

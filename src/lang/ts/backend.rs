@@ -28,6 +28,7 @@ impl ExportBackend for TypeScript {
             FieldType::String | FieldType::Timestamp | FieldType::Uuid => "string".into(),
             FieldType::Json => "unknown".into(),
             FieldType::Array(inner) => format!("Array<{}>", self.type_expr(inner)),
+            FieldType::Map(value) => format!("Record<string, {}>", self.type_expr(value)),
             FieldType::Named(name) => (*name).to_string(),
         }
     }

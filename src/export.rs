@@ -22,6 +22,11 @@ pub enum FieldType {
     /// An opaque JSON value (Rust `serde_json::Value`).
     Json,
     Array(&'static FieldType),
+    /// A string-keyed map (Rust `BTreeMap<String, V>` / `HashMap<String, V>`).
+    ///
+    /// Serde writes one as a JSON object, so it is a distinct shape from an
+    /// array and from an opaque value: the value type still crosses the boundary.
+    Map(&'static FieldType),
     /// A reference to another exported type, by name.
     Named(&'static str),
 }
