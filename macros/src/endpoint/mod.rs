@@ -6,11 +6,15 @@ use syn::{
     parse2,
 };
 
-/// `#[endpoint(POST, "/live/sessions")]` or `#[endpoint(GET, "/live/sessions/{id}", "getSession")]`.
+/// `#[endpoint(POST, "/live/sessions")]`,
+/// `#[endpoint(GET, "/live/sessions/{id}", "getSession")]`, or
+/// `#[endpoint(POST, "/imports/inspect", "imports.inspect", upload)]` for an
+/// endpoint whose body is a file.
 struct EndpointArgs {
     method: Ident,
     path: LitStr,
     name: Option<LitStr>,
+    upload: bool,
 }
 
 impl Parse for EndpointArgs {
@@ -18,13 +22,29 @@ impl Parse for EndpointArgs {
         let method: Ident = input.parse()?;
         input.parse::<Token![,]>()?;
         let path: LitStr = input.parse()?;
-        let name = if input.peek(Token![,]) {
+        let mut name = None;
+        let mut upload = false;
+
+        // Trailing options in either order: an operation name, and/or `upload`.
+        while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
-            Some(input.parse::<LitStr>()?)
-        } else {
-            None
-        };
-        Ok(Self { method, path, name })
+
+            if input.peek(LitStr) {
+                name = Some(input.parse::<LitStr>()?);
+
+                continue;
+            }
+
+            let flag: Ident = input.parse()?;
+
+            if flag != "upload" {
+                return Err(syn::Error::new(flag.span(), "expected `upload`"));
+            }
+
+            upload = true;
+        }
+
+        Ok(Self { method, path, name, upload })
     }
 }
 
@@ -47,7 +67,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     // (Pagination, Sort, Search) and the client types their intersection.
     let mut request_ty: Option<Type> = None;
     let mut query_tys: Vec<Type> = Vec::new();
-    let mut upload = false;
+    let mut upload = args.upload;
     for input in &func.sig.inputs {
         if let FnArg::Typed(arg) = input {
             if request_ty.is_none() {
