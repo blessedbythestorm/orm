@@ -50,7 +50,12 @@ fn field(f: &Field) -> String {
         expr = format!("v.array({expr})");
     }
     if f.optional {
-        expr = format!("v.optional({expr})");
+        // `nullish`, not `optional`: an absent `Option` is `undefined` on the way
+        // in but serde writes it as `null` on the way out, so a value read from
+        // the API and sent straight back has to validate. `v.optional` rejects
+        // null, which made every round-trip of an optional field fail — and the
+        // exported type says `field?: T | null`, so the two disagreed.
+        expr = format!("v.nullish({expr})");
     }
     expr
 }
