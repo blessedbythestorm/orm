@@ -20,6 +20,7 @@ fn generate_trait(table: &TableDef) -> TokenStream {
     let update_name = format_ident!("{}Update", name);
 
     let get_all = format_ident!("get_{}s", table.name_snake);
+    let count_all = format_ident!("count_{}s", table.name_snake);
     let get_one = format_ident!("get_{}", table.name_snake);
     let create = format_ident!("create_{}", table.name_snake);
     let update = format_ident!("update_{}", table.name_snake);
@@ -28,6 +29,7 @@ fn generate_trait(table: &TableDef) -> TokenStream {
     quote! {
         pub trait #trait_name {
             fn #get_all(&self, opts: ::orm::query::QueryOptions) -> impl std::future::Future<Output = anyhow::Result<Vec<#name>>> + Send;
+            fn #count_all(&self, opts: ::orm::query::QueryOptions) -> impl std::future::Future<Output = anyhow::Result<i64>> + Send;
             fn #get_one(&self, id: &uuid::Uuid) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
             fn #create(&self, data: &#insert_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
             fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
@@ -43,43 +45,83 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let update_name = format_ident!("{}Update", name);
 
     let get_all = format_ident!("get_{}s", table.name_snake);
+    let count_all = format_ident!("count_{}s", table.name_snake);
     let get_one = format_ident!("get_{}", table.name_snake);
     let create = format_ident!("create_{}", table.name_snake);
     let update = format_ident!("update_{}", table.name_snake);
     let delete = format_ident!("delete_{}", table.name_snake);
 
-    let get_all_body = generate_get_all(table);
-    let get_one_body = generate_get_one(table);
-    let create_body = generate_create(table);
-    let update_body = generate_update(table);
-    let delete_body = generate_delete(table);
+    let pool_client = quote! { let client = self.get().await?; };
+    let transaction_client = quote! { let client = self; };
+    let pool_get_all_body = generate_get_all(table, &pool_client);
+    let pool_count_all_body = generate_count_all(table, &pool_client);
+    let pool_get_one_body = generate_get_one(table, &pool_client);
+    let pool_create_body = generate_create(table, &pool_client);
+    let pool_update_body = generate_update(table, &pool_client);
+    let pool_delete_body = generate_delete(table, &pool_client);
+    let transaction_get_all_body = generate_get_all(table, &transaction_client);
+    let transaction_count_all_body = generate_count_all(table, &transaction_client);
+    let transaction_get_one_body = generate_get_one(table, &transaction_client);
+    let transaction_create_body = generate_create(table, &transaction_client);
+    let transaction_update_body = generate_update(table, &transaction_client);
+    let transaction_delete_body = generate_delete(table, &transaction_client);
 
     quote! {
         impl #trait_name for deadpool_postgres::Pool {
             async fn #get_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<Vec<#name>> {
-                #get_all_body
+                #pool_get_all_body
+            }
+
+            async fn #count_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<i64> {
+                #pool_count_all_body
             }
 
             async fn #get_one(&self, id: &uuid::Uuid) -> anyhow::Result<#name> {
-                #get_one_body
+                #pool_get_one_body
             }
 
             async fn #create(&self, data: &#insert_name) -> anyhow::Result<#name> {
-                #create_body
+                #pool_create_body
             }
 
             async fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> anyhow::Result<#name> {
-                #update_body
+                #pool_update_body
             }
 
             async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
-                #delete_body
+                #pool_delete_body
+            }
+        }
+
+        impl<'transaction> #trait_name for tokio_postgres::Transaction<'transaction> {
+            async fn #get_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<Vec<#name>> {
+                #transaction_get_all_body
+            }
+
+            async fn #count_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<i64> {
+                #transaction_count_all_body
+            }
+
+            async fn #get_one(&self, id: &uuid::Uuid) -> anyhow::Result<#name> {
+                #transaction_get_one_body
+            }
+
+            async fn #create(&self, data: &#insert_name) -> anyhow::Result<#name> {
+                #transaction_create_body
+            }
+
+            async fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> anyhow::Result<#name> {
+                #transaction_update_body
+            }
+
+            async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
+                #transaction_delete_body
             }
         }
     }
 }
 
-fn generate_get_all(table: &TableDef) -> TokenStream {
+fn generate_get_all(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
     let name = &table.name;
     let full_table = table.full_table_name();
     let columns = table.column_list();
@@ -89,7 +131,7 @@ fn generate_get_all(table: &TableDef) -> TokenStream {
     quote! {
         use ::orm::FromRow;
 
-        let client = self.get().await?;
+        #client_setup
         let (where_clause, _) = opts.build_where_clause(1);
         let suffix = opts.to_sql_suffix();
         let sql = format!("{}{}{}", #base_sql, where_clause, suffix);
@@ -103,7 +145,22 @@ fn generate_get_all(table: &TableDef) -> TokenStream {
     }
 }
 
-fn generate_get_one(table: &TableDef) -> TokenStream {
+fn generate_count_all(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
+    let full_table = table.full_table_name();
+    let err_msg = format!("Failed to count {}s", table.name_snake);
+
+    quote! {
+        #client_setup
+        let (where_clause, _) = opts.build_where_clause(1);
+        let sql = format!("SELECT COUNT(*) AS count FROM {}{}", #full_table, where_clause);
+        let row = client.query_one(&sql, &opts.filter_params()).await
+            .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
+        row.try_get::<_, i64>("count")
+            .map_err(|e| anyhow::anyhow!("Count parse error: {}", e))
+    }
+}
+
+fn generate_get_one(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
     let name = &table.name;
     let full_table = table.full_table_name();
     let columns = table.column_list();
@@ -113,7 +170,7 @@ fn generate_get_one(table: &TableDef) -> TokenStream {
     quote! {
         use ::orm::FromRow;
 
-        let client = self.get().await?;
+        #client_setup
         let row = client.query_one(#sql, &[id]).await
             .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
 
@@ -121,7 +178,7 @@ fn generate_get_one(table: &TableDef) -> TokenStream {
     }
 }
 
-fn generate_create(table: &TableDef) -> TokenStream {
+fn generate_create(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
     let name = &table.name;
     let full_table = table.full_table_name();
     let columns = table.column_list();
@@ -149,7 +206,7 @@ fn generate_create(table: &TableDef) -> TokenStream {
     quote! {
         use ::orm::FromRow;
 
-        let client = self.get().await?;
+        #client_setup
         let mut insert_columns: Vec<&str> = Vec::new();
         let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
 
@@ -178,7 +235,7 @@ fn generate_create(table: &TableDef) -> TokenStream {
     }
 }
 
-fn generate_update(table: &TableDef) -> TokenStream {
+fn generate_update(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
     let name = &table.name;
     let full_table = table.full_table_name();
     let columns = table.column_list();
@@ -212,7 +269,7 @@ fn generate_update(table: &TableDef) -> TokenStream {
     quote! {
         use ::orm::FromRow;
 
-        let client = self.get().await?;
+        #client_setup
         let mut set_clauses = String::new();
         let mut param_idx = 0usize;
         let mut has_updates = false;
@@ -237,7 +294,7 @@ fn generate_update(table: &TableDef) -> TokenStream {
     }
 }
 
-fn generate_delete(table: &TableDef) -> TokenStream {
+fn generate_delete(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
     let name = &table.name;
     let full_table = table.full_table_name();
     let sql = format!("DELETE FROM {} WHERE id = $1", full_table);
@@ -245,7 +302,7 @@ fn generate_delete(table: &TableDef) -> TokenStream {
     let not_found_err = format!("{} not found", name);
 
     quote! {
-        let client = self.get().await?;
+        #client_setup
         let result = client.execute(#sql, &[id]).await
             .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
 

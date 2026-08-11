@@ -78,6 +78,28 @@ fn null_ops_need_no_value() {
 }
 
 #[test]
+fn set_filters_use_one_parameterized_postgres_array() {
+    let options = QueryOptions::new()
+        .filter("status", FilterOp::In, vec!["open".to_owned(), "pending".to_owned()]);
+    let (sql, next) = options.build_where_clause(1);
+
+    assert_eq!(sql, " WHERE status = ANY($1)");
+    assert_eq!(next, 2);
+    assert_eq!(options.filter_params().len(), 1);
+}
+
+#[test]
+fn numeric_values_are_supported() {
+    let (sql, next) = QueryOptions::new()
+        .filter("total_cents", FilterOp::Gte, 1000_i64)
+        .filter("quantity", FilterOp::Gt, 0.5_f64)
+        .build_where_clause(1);
+
+    assert_eq!(sql, " WHERE total_cents >= $1 AND quantity > $2");
+    assert_eq!(next, 3);
+}
+
+#[test]
 fn from_params_defaults_and_caps_pagination() {
     use orm::query::{Pagination, Search, Sort};
 

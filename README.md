@@ -338,7 +338,20 @@ let options = QueryOptions::new()
 let accounts = pool.get_accounts(options).await?;
 ```
 
-Values are parameterized. Field names, sort names, and raw view/table SQL are
+Generated table CRUD also provides `count_<table>s(QueryOptions)`. The same
+CRUD trait is implemented for `tokio_postgres::Transaction`, so a service can
+compose generated reads and writes atomically without dropping down to raw SQL:
+
+```rust
+let mut client = pool.get().await?;
+let transaction = client.transaction().await?;
+let account = transaction.create_account(&payload).await?;
+transaction.commit().await?;
+```
+
+`FilterOp::In` and `FilterOp::NotIn` accept vectors and bind them as a single
+PostgreSQL array (`= ANY($n)` / `<> ALL($n)`). Values are parameterized. Field
+names, sort names, and raw view/table SQL are
 not; whitelist any identifier derived from user input. Built-in filter values
 are strings, `i32`, `bool`, `Uuid`, `Option<T>`, and `#[enum_type]` enums.
 

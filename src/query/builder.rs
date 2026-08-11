@@ -57,7 +57,17 @@ macro_rules! impl_direct_filter_value {
     )+};
 }
 
-impl_direct_filter_value!(i32, bool, uuid::Uuid);
+impl_direct_filter_value!(i16, i32, i64, f32, f64, bool, uuid::Uuid);
+
+impl<T> FilterValue for Vec<T>
+where
+    T: tokio_postgres::types::ToSql + Send + Sync + std::fmt::Debug + 'static,
+    Vec<T>: tokio_postgres::types::ToSql,
+{
+    fn into_filter_value(self, _op: FilterOp) -> Option<Arc<dyn ToSql + Send + Sync>> {
+        Some(Arc::new(self))
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum LogicalOp {
@@ -143,6 +153,8 @@ pub enum FilterOp {
     Lte,
     Like,
     ILike,
+    In,
+    NotIn,
     IsNull,
     IsNotNull,
 }
@@ -158,6 +170,8 @@ impl FilterOp {
             FilterOp::Lte => "<=",
             FilterOp::Like => "LIKE",
             FilterOp::ILike => "ILIKE",
+            FilterOp::In => "= ANY",
+            FilterOp::NotIn => "<> ALL",
             FilterOp::IsNull => "IS NULL",
             FilterOp::IsNotNull => "IS NOT NULL",
         }
@@ -259,7 +273,11 @@ impl QueryOptions {
                 .iter()
                 .map(|f| {
                     if f.op.needs_value() {
-                        let s = format!("{} {} ${}", f.field, f.op.as_sql(), param_idx);
+                        let s = if matches!(f.op, FilterOp::In | FilterOp::NotIn) {
+                            format!("{} {}(${})", f.field, f.op.as_sql(), param_idx)
+                        } else {
+                            format!("{} {} ${}", f.field, f.op.as_sql(), param_idx)
+                        };
                         param_idx += 1;
                         s
                     } else {
