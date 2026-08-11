@@ -125,11 +125,18 @@ pub fn generate_client(out_dir: &str, types_prefix: &str) -> anyhow::Result<()> 
         let _ = writeln!(out, "import type {{ {} }} from \"{module}\";", comma_separated(names));
     }
 
-    let _ = writeln!(out, "import {{ ok, err, result, type Result }} from \"$lib/lib/result\";");
+    let _ = writeln!(
+        out,
+        "import {{ ok, err, result, type Result }} from \"{types_prefix}/lib/result\";"
+    );
 
     if needs_validate {
         let _ = writeln!(out, "import * as v from \"valibot\";");
-        let _ = writeln!(out, "import {{ {} }} from \"$lib/schema/schemas\";", comma_separated(&schema_imports));
+        let _ = writeln!(
+            out,
+            "import {{ {} }} from \"{types_prefix}/schema/schemas\";",
+            comma_separated(&schema_imports)
+        );
     }
 
     out.push_str(CONFIG_BLOCK);

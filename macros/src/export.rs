@@ -66,7 +66,7 @@ pub fn field_type(ty: &Type) -> (TokenStream, bool) {
 
     let ident = last_ident(ty);
     let variant = match ident.as_deref() {
-        Some("String" | "str") => quote! { &::orm::export::FieldType::String },
+        Some("String" | "str" | "NaiveDate") => quote! { &::orm::export::FieldType::String },
         Some("bool") => quote! { &::orm::export::FieldType::Bool },
         Some(
             "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
@@ -113,7 +113,13 @@ pub fn fields_from(fields: &syn::Fields) -> Vec<Field> {
             .named
             .iter()
             .map(|f| Field {
-                name: f.ident.as_ref().expect("named field").to_string(),
+                name: f
+                    .ident
+                    .as_ref()
+                    .expect("named field")
+                    .to_string()
+                    .trim_start_matches("r#")
+                    .to_string(),
                 ty: f.ty.clone(),
                 forced_optional: false,
             })

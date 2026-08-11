@@ -33,6 +33,9 @@ enum Command {
         /// Output directory. Defaults to the value the caller passed to `main`.
         #[arg(long, short)]
         out: Option<String>,
+        /// Module prefix used by the generated client imports.
+        #[arg(long, default_value = "$lib")]
+        import_prefix: String,
     },
     /// Generate and inspect schema migrations from the registered types.
     #[command(subcommand)]
@@ -45,7 +48,11 @@ enum Command {
 impl Command {
     fn run(self, default_out: &str) -> anyhow::Result<()> {
         match self {
-            Command::Generate { lang, out } => generate(&lang, &out.unwrap_or_else(|| default_out.to_string())),
+            Command::Generate { lang, out, import_prefix } => generate(
+                &lang,
+                &out.unwrap_or_else(|| default_out.to_string()),
+                &import_prefix,
+            ),
             Command::Migrate(command) => command.run(),
             Command::Seed(command) => command.run(),
         }
@@ -91,12 +98,12 @@ impl SeedCommand {
     }
 }
 
-fn generate(lang: &str, out: &str) -> anyhow::Result<()> {
+fn generate(lang: &str, out: &str, import_prefix: &str) -> anyhow::Result<()> {
     match lang {
         "ts" | "typescript" => {
             crate::export::export_all_types(out, &crate::lang::ts::TypeScript)?;
             crate::validator::export_validators(out, &crate::lang::ts::Valibot)?;
-            crate::lang::ts::generate_client(out, "$lib")?;
+            crate::lang::ts::generate_client(out, import_prefix)?;
             crate::lang::ts::generate_result(out)?;
         }
         other => anyhow::bail!("unsupported language: {other} (supported: ts)"),

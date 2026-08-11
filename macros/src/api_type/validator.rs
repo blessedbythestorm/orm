@@ -19,7 +19,13 @@ pub fn generate(input: &Item) -> TokenStream {
 
     let name = item.ident.to_string();
     let field_defs = fields.named.iter().map(|field| {
-        let field_name = field.ident.as_ref().expect("named field").to_string();
+        let field_name = field
+            .ident
+            .as_ref()
+            .expect("named field")
+            .to_string()
+            .trim_start_matches("r#")
+            .to_string();
         let (base, optional, array) = base_type(&field.ty);
         let rules = rules(&field.attrs);
 

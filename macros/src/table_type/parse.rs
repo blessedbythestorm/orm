@@ -93,7 +93,7 @@ impl TableDef {
             _ => panic!("TableType only supports structs with named fields"),
         };
 
-        let mut table = TableSpec::parse(&input.attrs, &config.table);
+        let table = TableSpec::parse(&input.attrs, &config.table);
         table.assert_names_fit();
 
         // A field's own `#[pg(check(...))]` is just a one-column table check;
@@ -137,7 +137,7 @@ impl TableDef {
 impl FieldDef {
     pub fn parse(field: &syn::Field) -> Self {
         let name = field.ident.clone().expect("Field must have a name");
-        let name_str = name.to_string();
+        let name_str = name.to_string().trim_start_matches("r#").to_string();
         let ty = field.ty.clone();
         let is_optional = is_option_type(&ty);
 

@@ -23,7 +23,7 @@ fn pipes_a_base_type_with_its_rules() {
 
     assert_eq!(
         out,
-        "export const SignupSchema = v.object({\n  email: v.pipe(v.string(), v.email()),\n  age: v.optional(v.pipe(v.number(), v.minValue(0), v.maxValue(120))),\n});"
+        "export const SignupSchema = v.object({\n  email: v.pipe(v.string(), v.email()),\n  age: v.nullish(v.pipe(v.number(), v.minValue(0), v.maxValue(120))),\n});"
     );
 }
 
@@ -98,5 +98,5 @@ fn unregistered_named_type_stays_unknown() {
         &[Field { name: "thing", base: BaseType::Named("NotRegistered"), rules: &[], optional: true, array: false }],
     );
 
-    assert!(out.contains("thing: v.optional(v.unknown())"), "{out}");
+    assert!(out.contains("thing: v.nullish(v.unknown())"), "{out}");
 }
