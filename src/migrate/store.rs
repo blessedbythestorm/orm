@@ -63,7 +63,12 @@ impl MigrationStore {
             return Ok(DatabaseSchema::default());
         };
 
-        let path = self.snapshot_path(version_of(&tip));
+        self.load_snapshot(&tip)
+    }
+
+    /// Loads the schema snapshot recorded for a particular migration.
+    pub fn load_snapshot(&self, stem: &str) -> anyhow::Result<DatabaseSchema> {
+        let path = self.snapshot_path(version_of(stem));
         let contents =
             std::fs::read_to_string(&path).with_context(|| format!("reading snapshot {}", path.display()))?;
         serde_json::from_str(&contents).with_context(|| format!("parsing snapshot {}", path.display()))

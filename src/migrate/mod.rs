@@ -178,6 +178,7 @@ pub fn diff_live(
     block_on(async move {
         let desired = assemble_desired_schema();
         let db = Database::connect(&url).await?;
+        verify_database_history(&store, &db).await?;
         let mut current = db.introspect(&owned_schemas(&desired)).await?;
         adopt_matching_expressions(&mut current, &desired);
 
@@ -215,6 +216,53 @@ pub fn diff_live(
         }
         Ok(())
     })
+}
+
+/// Verifies that the live schema still matches the snapshot of its latest
+/// recorded migration. Pending local migrations are allowed; gaps, unknown
+/// applied migrations, and out-of-band schema changes are not.
+async fn verify_database_history(store: &MigrationStore, db: &Database) -> anyhow::Result<()> {
+    db.ensure_migrations_table().await?;
+
+    let stems = store.stems()?;
+    let applied = db.applied().await?;
+    let unknown: Vec<&String> = applied.iter().filter(|stem| !stems.contains(stem)).collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "database contains migration(s) absent from the repository: {}",
+            unknown.iter().map(|stem| stem.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    let applied_count = stems.iter().take_while(|stem| applied.contains(*stem)).count();
+    if stems.iter().skip(applied_count).any(|stem| applied.contains(stem)) {
+        anyhow::bail!("database migration history contains a gap; applied migrations must be a prefix");
+    }
+
+    let expected = match applied_count.checked_sub(1) {
+        Some(index) => store.load_snapshot(&stems[index])?,
+        None => DatabaseSchema::default(),
+    };
+    let mut current = db.introspect(&owned_schemas(&expected)).await?;
+    adopt_matching_expressions(&mut current, &expected);
+    let drift = diff(&current, &expected, &mut NoRenames);
+    if !drift.is_empty() {
+        anyhow::bail!(
+            "database drifted from its latest applied migration ({} change(s)); reconcile it before generating a new migration\n{}",
+            drift.len(),
+            render(&drift)
+        );
+    }
+
+    let pending = stems.len().saturating_sub(applied_count);
+    println!(
+        "{}",
+        style::success(&format!(
+            "Verified database migration history ({} applied, {} pending).",
+            applied_count, pending
+        ))
+    );
+    Ok(())
 }
 
 /// Lists migrations and, when a database is reachable, which are applied vs pending.
