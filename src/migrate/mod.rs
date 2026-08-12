@@ -12,6 +12,8 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::Path;
 
+use anyhow::Context;
+
 use crate::schema::{
     DatabaseSchema, NoRenames, RenameResolver, assemble_desired_schema, diff, invert, render,
 };
@@ -38,6 +40,26 @@ pub fn generate(directory: &Path, name: &str, interactive: bool) -> anyhow::Resu
     let stem = store.write_migration(name, &up, &down, &desired)?;
     println!("{}", style::success(&format!("Generated {} ({} change(s))", style::bold(&stem), up.len())));
     Ok(())
+}
+
+/// Appends a migration by introspecting the database selected through an
+/// environment variable and diffing that live schema against the Rust models.
+/// The variable name is accepted separately so credentials never need to be
+/// passed in process arguments.
+pub fn generate_from_database(
+    directory: &Path,
+    name: &str,
+    interactive: bool,
+    database_url_env: &str,
+) -> anyhow::Result<()> {
+    if database_url_env.is_empty() {
+        anyhow::bail!("database URL environment variable name cannot be empty");
+    }
+
+    let url = std::env::var(database_url_env)
+        .with_context(|| format!("{database_url_env} is not set"))?;
+
+    diff_live(directory, Some(url), Some(name.to_owned()), interactive)
 }
 
 /// Applies every migration not yet recorded in `_orm_migrations`.

@@ -399,8 +399,9 @@ language backend. The current CLI language is TypeScript.
 
 ## Migrations
 
-Tables, enums, and views register schema metadata. The CLI diffs that metadata
-against snapshots and writes `.up.sql`, `.down.sql`, and `meta/*.json` files:
+Tables, enums, and views register schema metadata. Migration generation
+introspects the live database selected by `DATABASE_URL`, diffs it against the
+Rust metadata, and writes `.up.sql`, `.down.sql`, and `meta/*.json` files:
 
 ```sh
 cargo run --bin orm-cli -- migrate generate create_accounts
@@ -410,6 +411,18 @@ cargo run --bin orm-cli -- migrate status
 cargo run --bin orm-cli -- migrate diff
 cargo run --bin orm-cli -- migrate diff --write reconcile_database
 ```
+
+To generate against another environment without replacing the local
+`DATABASE_URL`, name the variable containing that connection URL:
+
+```sh
+PROD_DATABASE_URL=postgres://localhost:15432/app \
+  cargo run --bin orm-cli -- migrate generate add_orders \
+    --database-url-env PROD_DATABASE_URL
+```
+
+This is useful with an SSH or platform database proxy. The URL remains in the
+environment rather than appearing in the command line.
 
 `migrate baseline <name>` adopts an existing database without running SQL.
 `migrate revert` runs the latest down migration and removes its files. Review

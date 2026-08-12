@@ -115,7 +115,7 @@ fn generate(lang: &str, out: &str, import_prefix: &str) -> anyhow::Result<()> {
 
 #[derive(Subcommand)]
 enum MigrateCommand {
-    /// Diff the Rust schema against the snapshot and write a new migration.
+    /// Diff the Rust schema against a live database and write a new migration.
     Generate {
         /// Name for the migration file.
         name: String,
@@ -125,6 +125,9 @@ enum MigrateCommand {
         /// Don't prompt for renames; treat every change as drop + add.
         #[arg(long)]
         no_input: bool,
+        /// Environment variable containing the target database URL.
+        #[arg(long, default_value = "DATABASE_URL")]
+        database_url_env: String,
     },
     /// Apply pending migrations to the target database.
     Apply {
@@ -180,8 +183,13 @@ impl MigrateCommand {
         use crate::migrate;
 
         match self {
-            MigrateCommand::Generate { name, dir, no_input } => {
-                migrate::generate(Path::new(&dir), &name, !no_input)
+            MigrateCommand::Generate { name, dir, no_input, database_url_env } => {
+                migrate::generate_from_database(
+                    Path::new(&dir),
+                    &name,
+                    !no_input,
+                    &database_url_env,
+                )
             }
             MigrateCommand::Apply { dir, database_url } => migrate::apply(Path::new(&dir), database_url),
             MigrateCommand::Revert { dir, database_url, yes } => {
