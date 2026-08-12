@@ -52,6 +52,7 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let delete = format_ident!("delete_{}", table.name_snake);
 
     let pool_client = quote! { let client = self.get().await?; };
+    let object_client = quote! { let client = self; };
     let transaction_client = quote! { let client = self; };
     let pool_get_all_body = generate_get_all(table, &pool_client);
     let pool_count_all_body = generate_count_all(table, &pool_client);
@@ -59,6 +60,12 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let pool_create_body = generate_create(table, &pool_client);
     let pool_update_body = generate_update(table, &pool_client);
     let pool_delete_body = generate_delete(table, &pool_client);
+    let object_get_all_body = generate_get_all(table, &object_client);
+    let object_count_all_body = generate_count_all(table, &object_client);
+    let object_get_one_body = generate_get_one(table, &object_client);
+    let object_create_body = generate_create(table, &object_client);
+    let object_update_body = generate_update(table, &object_client);
+    let object_delete_body = generate_delete(table, &object_client);
     let transaction_get_all_body = generate_get_all(table, &transaction_client);
     let transaction_count_all_body = generate_count_all(table, &transaction_client);
     let transaction_get_one_body = generate_get_one(table, &transaction_client);
@@ -90,6 +97,32 @@ fn generate_impl(table: &TableDef) -> TokenStream {
 
             async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
                 #pool_delete_body
+            }
+        }
+
+        impl #trait_name for deadpool_postgres::Object {
+            async fn #get_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<Vec<#name>> {
+                #object_get_all_body
+            }
+
+            async fn #count_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<i64> {
+                #object_count_all_body
+            }
+
+            async fn #get_one(&self, id: &uuid::Uuid) -> anyhow::Result<#name> {
+                #object_get_one_body
+            }
+
+            async fn #create(&self, data: &#insert_name) -> anyhow::Result<#name> {
+                #object_create_body
+            }
+
+            async fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> anyhow::Result<#name> {
+                #object_update_body
+            }
+
+            async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
+                #object_delete_body
             }
         }
 
