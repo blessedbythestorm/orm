@@ -165,6 +165,9 @@ enum MigrateCommand {
         database_url: Option<String>,
         #[arg(long)]
         write: Option<String>,
+        /// Exit unsuccessfully when schema drift is detected.
+        #[arg(long)]
+        check: bool,
         /// Don't prompt for renames; treat them as drop + add.
         #[arg(long)]
         no_input: bool,
@@ -198,8 +201,8 @@ impl MigrateCommand {
             MigrateCommand::Baseline { name, dir, database_url } => {
                 migrate::baseline(Path::new(&dir), &name, database_url)
             }
-            MigrateCommand::Diff { dir, database_url, write, no_input } => {
-                migrate::diff_live(Path::new(&dir), database_url, write, !no_input)
+            MigrateCommand::Diff { dir, database_url, write, check, no_input } => {
+                migrate::diff_live(Path::new(&dir), database_url, write, check, !no_input)
             }
             MigrateCommand::Status { dir, database_url } => migrate::status(Path::new(&dir), database_url),
         }

@@ -176,6 +176,7 @@ pub fn diff_live(
     directory: &Path,
     database_url: Option<String>,
     write: Option<String>,
+    check: bool,
     interactive: bool,
 ) -> anyhow::Result<()> {
     let store = MigrationStore::new(directory);
@@ -194,6 +195,10 @@ pub fn diff_live(
         if changes.is_empty() {
             println!("{}", style::success("No drift — the database matches the Rust schema."));
             return Ok(());
+        }
+
+        if check && write.is_none() {
+            anyhow::bail!("database schema differs from the Rust models");
         }
 
         match write {
