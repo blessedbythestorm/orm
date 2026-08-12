@@ -27,9 +27,11 @@ fn generate_trait(table: &TableDef) -> TokenStream {
     let delete = format_ident!("delete_{}", table.name_snake);
     let upserts = unique_keys(table).into_iter().map(|columns| {
         let method = upsert_method(table, &columns);
+        let selective_method = format_ident!("{}_with", method);
 
         quote! {
             fn #method(&self, data: &#insert_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
+            fn #selective_method(&self, data: &#insert_name, update: &#update_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
         }
     });
 
@@ -200,20 +202,119 @@ fn upsert_method(table: &TableDef, columns: &[String]) -> syn::Ident {
 fn generate_upsert_impls(table: &TableDef, client_setup: &TokenStream) -> Vec<TokenStream> {
     let name = &table.name;
     let insert_name = format_ident!("{}Insert", name);
+    let update_name = format_ident!("{}Update", name);
 
     unique_keys(table)
         .into_iter()
         .map(|columns| {
             let method = upsert_method(table, &columns);
             let body = generate_upsert(table, &columns, client_setup);
+            let selective_method = format_ident!("{}_with", method);
+            let selective_body = generate_selective_upsert(table, &columns, client_setup);
 
             quote! {
                 async fn #method(&self, data: &#insert_name) -> anyhow::Result<#name> {
                     #body
                 }
+
+                async fn #selective_method(&self, data: &#insert_name, update: &#update_name) -> anyhow::Result<#name> {
+                    #selective_body
+                }
             }
         })
         .collect()
+}
+
+fn generate_selective_upsert(
+    table: &TableDef,
+    conflict_columns: &[String],
+    client_setup: &TokenStream,
+) -> TokenStream {
+    let name = &table.name;
+    let full_table = table.full_table_name();
+    let columns = table.column_list();
+    let conflict_target = conflict_columns.join(", ");
+    let no_op_column = &conflict_columns[0];
+    let err_msg = format!(
+        "Failed to upsert {} by {}",
+        table.name_snake,
+        conflict_columns.join(", ")
+    );
+
+    let insert_collectors = table.insert_fields().map(|field| {
+        let name = &field.name;
+        let column = &field.name_str;
+
+        if field.is_auto_generated {
+            quote! {
+                if let Some(ref value) = data.#name {
+                    insert_columns.push(#column);
+                    params.push(value as &(dyn tokio_postgres::types::ToSql + Sync));
+                }
+            }
+        }
+        else {
+            quote! {
+                insert_columns.push(#column);
+                params.push(&data.#name as &(dyn tokio_postgres::types::ToSql + Sync));
+            }
+        }
+    });
+
+    let update_fields: Vec<_> = table
+        .update_fields()
+        .filter(|field| !conflict_columns.contains(&field.name_str))
+        .collect();
+
+    let assignment_builders = update_fields.iter().map(|field| {
+        let name = &field.name;
+        let column = &field.name_str;
+
+        quote! {
+            if let Some(ref value) = update.#name {
+                params.push(value as &(dyn tokio_postgres::types::ToSql + Sync));
+                assignments.push(format!("{} = ${}", #column, params.len()));
+            }
+        }
+    });
+
+    quote! {
+        use ::orm::FromRow;
+
+        #client_setup
+        let mut insert_columns: Vec<&str> = Vec::new();
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+
+        #(#insert_collectors)*
+
+        let placeholders = (1..=insert_columns.len())
+            .map(|index| format!("${}", index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut assignments = Vec::new();
+
+        #(#assignment_builders)*
+
+        if assignments.is_empty() {
+            assignments.push(format!("{} = EXCLUDED.{}", #no_op_column, #no_op_column));
+        }
+
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING {}",
+            #full_table,
+            insert_columns.join(", "),
+            placeholders,
+            #conflict_target,
+            assignments.join(", "),
+            #columns,
+        );
+
+        let row = client.query_one(&sql, &params).await
+            .map_err(|error| anyhow::anyhow!(concat!(#err_msg, ": {}"), error))?;
+
+        #name::from_row(&row)
+            .map_err(|error| anyhow::anyhow!("Row parse error: {}", error))
+    }
 }
 
 fn generate_upsert(

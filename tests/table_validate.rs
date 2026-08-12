@@ -26,6 +26,13 @@ pub struct Gadget {
 fn generated_upserts_compile<T: GadgetCrud>(client: &T, data: &GadgetInsert) {
     let _ = client.upsert_gadget_by_name(data);
     let _ = client.upsert_gadget_by_name_and_contact(data);
+    let _ = client.upsert_gadget_by_name_with(
+        data,
+        &GadgetUpdate {
+            name: None,
+            contact: None,
+        },
+    );
 }
 
 #[test]

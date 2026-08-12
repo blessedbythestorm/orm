@@ -175,6 +175,9 @@ Generated upserts use PostgreSQL `ON CONFLICT`, update all mutable columns from
 the proposed row, and return the inserted or updated record. The same CRUD
 methods are available on a pooled `deadpool_postgres::Object` and a native
 `tokio_postgres::Transaction`, allowing callers to compose them atomically.
+Each key also has a selective `_with` variant that accepts an update value and
+changes only its populated fields, for example
+`upsert_account_by_email_with(&insert, &update)`.
 
 Generated CRUD assumes an `id: uuid::Uuid` column and uses `WHERE id = $1`.
 For another key shape, use `FromRow`/`QueryExt` or write a repository manually.
