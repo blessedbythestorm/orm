@@ -165,7 +165,16 @@ pub struct Account {
 - `orm::FromRow`, Serde, and `orm::Validate` implementations;
 - TypeScript export metadata and migration schema metadata;
 - `get_accounts`, `get_account`, `create_account`, `update_account`, and
-  `delete_account` on `deadpool_postgres::Pool`.
+  `delete_account` on `deadpool_postgres::Pool`;
+- a typed upsert for every declared unique key, such as
+  `upsert_account_by_email(&AccountInsert)` for `#[pg(unique)]` and
+  `upsert_membership_by_account_id_and_user_id(...)` for a composite
+  `#[table(unique(account_id, user_id))]` constraint.
+
+Generated upserts use PostgreSQL `ON CONFLICT`, update all mutable columns from
+the proposed row, and return the inserted or updated record. The same CRUD
+methods are available on a pooled `deadpool_postgres::Object` and a native
+`tokio_postgres::Transaction`, allowing callers to compose them atomically.
 
 Generated CRUD assumes an `id: uuid::Uuid` column and uses `WHERE id = $1`.
 For another key shape, use `FromRow`/`QueryExt` or write a repository manually.

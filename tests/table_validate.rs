@@ -8,9 +8,11 @@ use orm::validate::Validate;
 use uuid::Uuid;
 
 #[table_type(schema = "public", name = "gadgets", export_to = "types/gadgets.ts")]
+#[table(unique(name, contact))]
 pub struct Gadget {
     #[pg(primary, default(sql("gen_random_uuid()")))]
     pub id: Uuid,
+    #[pg(unique)]
     #[api(validate(length(min(3), max(30))))]
     pub name: String,
     #[api(validate(email))]
@@ -18,6 +20,12 @@ pub struct Gadget {
     #[pg(default(sql("now()")))]
     #[crud(insert(optional), update(skip))]
     pub created_at: DateTime<Utc>,
+}
+
+#[allow(dead_code)]
+fn generated_upserts_compile<T: GadgetCrud>(client: &T, data: &GadgetInsert) {
+    let _ = client.upsert_gadget_by_name(data);
+    let _ = client.upsert_gadget_by_name_and_contact(data);
 }
 
 #[test]

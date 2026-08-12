@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use super::parse::TableDef;
+use super::parse::{ConstraintKindSpec, TableDef};
 
 pub fn generate(table: &TableDef) -> TokenStream {
     let trait_def = generate_trait(table);
@@ -25,6 +25,13 @@ fn generate_trait(table: &TableDef) -> TokenStream {
     let create = format_ident!("create_{}", table.name_snake);
     let update = format_ident!("update_{}", table.name_snake);
     let delete = format_ident!("delete_{}", table.name_snake);
+    let upserts = unique_keys(table).into_iter().map(|columns| {
+        let method = upsert_method(table, &columns);
+
+        quote! {
+            fn #method(&self, data: &#insert_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
+        }
+    });
 
     quote! {
         pub trait #trait_name {
@@ -34,6 +41,7 @@ fn generate_trait(table: &TableDef) -> TokenStream {
             fn #create(&self, data: &#insert_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
             fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
             fn #delete(&self, id: &uuid::Uuid) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+            #(#upserts)*
         }
     }
 }
@@ -72,6 +80,9 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let transaction_create_body = generate_create(table, &transaction_client);
     let transaction_update_body = generate_update(table, &transaction_client);
     let transaction_delete_body = generate_delete(table, &transaction_client);
+    let pool_upserts = generate_upsert_impls(table, &pool_client);
+    let object_upserts = generate_upsert_impls(table, &object_client);
+    let transaction_upserts = generate_upsert_impls(table, &transaction_client);
 
     quote! {
         impl #trait_name for deadpool_postgres::Pool {
@@ -98,6 +109,8 @@ fn generate_impl(table: &TableDef) -> TokenStream {
             async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
                 #pool_delete_body
             }
+
+            #(#pool_upserts)*
         }
 
         impl #trait_name for deadpool_postgres::Object {
@@ -124,6 +137,8 @@ fn generate_impl(table: &TableDef) -> TokenStream {
             async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
                 #object_delete_body
             }
+
+            #(#object_upserts)*
         }
 
         impl<'transaction> #trait_name for tokio_postgres::Transaction<'transaction> {
@@ -150,7 +165,136 @@ fn generate_impl(table: &TableDef) -> TokenStream {
             async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
                 #transaction_delete_body
             }
+
+            #(#transaction_upserts)*
         }
+    }
+}
+
+fn unique_keys(table: &TableDef) -> Vec<Vec<String>> {
+    let mut keys: Vec<Vec<String>> = table
+        .fields
+        .iter()
+        .filter(|field| field.is_unique)
+        .map(|field| vec![field.name_str.clone()])
+        .collect();
+
+    keys.extend(table.constraints.iter().filter_map(|constraint| {
+        match &constraint.kind {
+            ConstraintKindSpec::Unique { columns } => Some(columns.clone()),
+            ConstraintKindSpec::Check { .. } => None,
+        }
+    }));
+
+    keys
+}
+
+fn upsert_method(table: &TableDef, columns: &[String]) -> syn::Ident {
+    format_ident!(
+        "upsert_{}_by_{}",
+        table.name_snake,
+        columns.join("_and_")
+    )
+}
+
+fn generate_upsert_impls(table: &TableDef, client_setup: &TokenStream) -> Vec<TokenStream> {
+    let name = &table.name;
+    let insert_name = format_ident!("{}Insert", name);
+
+    unique_keys(table)
+        .into_iter()
+        .map(|columns| {
+            let method = upsert_method(table, &columns);
+            let body = generate_upsert(table, &columns, client_setup);
+
+            quote! {
+                async fn #method(&self, data: &#insert_name) -> anyhow::Result<#name> {
+                    #body
+                }
+            }
+        })
+        .collect()
+}
+
+fn generate_upsert(
+    table: &TableDef,
+    conflict_columns: &[String],
+    client_setup: &TokenStream,
+) -> TokenStream {
+    let name = &table.name;
+    let full_table = table.full_table_name();
+    let columns = table.column_list();
+    let conflict_target = conflict_columns.join(", ");
+    let err_msg = format!(
+        "Failed to upsert {} by {}",
+        table.name_snake,
+        conflict_columns.join(", ")
+    );
+
+    let collectors = table.insert_fields().map(|field| {
+        let name = &field.name;
+        let column = &field.name_str;
+
+        if field.is_auto_generated {
+            quote! {
+                if let Some(ref value) = data.#name {
+                    insert_columns.push(#column);
+                    params.push(value as &(dyn tokio_postgres::types::ToSql + Sync));
+                }
+            }
+        }
+        else {
+            quote! {
+                insert_columns.push(#column);
+                params.push(&data.#name as &(dyn tokio_postgres::types::ToSql + Sync));
+            }
+        }
+    });
+
+    let mut update_columns: Vec<&str> = table
+        .update_fields()
+        .filter(|field| !conflict_columns.contains(&field.name_str))
+        .map(|field| field.name_str.as_str())
+        .collect();
+
+    if update_columns.is_empty() {
+        update_columns.push(&conflict_columns[0]);
+    }
+
+    let assignments = update_columns
+        .iter()
+        .map(|column| format!("{column} = EXCLUDED.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    quote! {
+        use ::orm::FromRow;
+
+        #client_setup
+        let mut insert_columns: Vec<&str> = Vec::new();
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+
+        #(#collectors)*
+
+        let placeholders = (1..=insert_columns.len())
+            .map(|index| format!("${}", index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING {}",
+            #full_table,
+            insert_columns.join(", "),
+            placeholders,
+            #conflict_target,
+            #assignments,
+            #columns,
+        );
+
+        let row = client.query_one(&sql, &params).await
+            .map_err(|error| anyhow::anyhow!(concat!(#err_msg, ": {}"), error))?;
+
+        #name::from_row(&row)
+            .map_err(|error| anyhow::anyhow!("Row parse error: {}", error))
     }
 }
 
