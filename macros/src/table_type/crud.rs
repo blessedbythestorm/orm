@@ -195,7 +195,7 @@ fn unique_keys(table: &TableDef) -> Vec<Vec<String>> {
     let mut keys: Vec<Vec<String>> = table
         .fields
         .iter()
-        .filter(|field| field.is_unique)
+        .filter(|field| field.is_primary || field.is_unique)
         .map(|field| vec![field.name_str.clone()])
         .collect();
 
@@ -460,7 +460,8 @@ fn generate_get_one(table: &TableDef, client_setup: &TokenStream) -> TokenStream
     let name = &table.name;
     let full_table = table.full_table_name();
     let columns = table.column_list();
-    let sql = format!("SELECT {} FROM {} WHERE id = $1", columns, full_table);
+    let primary_key = table.primary_key_name();
+    let sql = format!("SELECT {} FROM {} WHERE {} = $1", columns, full_table, primary_key);
     let err_msg = format!("Failed to get {}", table.name_snake);
 
     quote! {
@@ -537,6 +538,7 @@ fn generate_update(table: &TableDef, client_setup: &TokenStream) -> TokenStream 
     let columns = table.column_list();
     let err_msg = format!("Failed to update {}", table.name_snake);
     let no_fields_err = format!("No fields to update for {}", table.name_snake);
+    let primary_key = table.primary_key_name();
 
     let update_fields: Vec<_> = table.update_fields().collect();
 
@@ -577,7 +579,7 @@ fn generate_update(table: &TableDef, client_setup: &TokenStream) -> TokenStream 
         }
 
         param_idx += 1;
-        let sql = format!("UPDATE {} SET {} WHERE id = ${} RETURNING {}", #full_table, set_clauses, param_idx, #columns);
+        let sql = format!("UPDATE {} SET {} WHERE {} = ${} RETURNING {}", #full_table, set_clauses, #primary_key, param_idx, #columns);
 
         let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
         #(#param_collectors)*
@@ -593,7 +595,8 @@ fn generate_update(table: &TableDef, client_setup: &TokenStream) -> TokenStream 
 fn generate_delete(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
     let name = &table.name;
     let full_table = table.full_table_name();
-    let sql = format!("DELETE FROM {} WHERE id = $1", full_table);
+    let primary_key = table.primary_key_name();
+    let sql = format!("DELETE FROM {} WHERE {} = $1", full_table, primary_key);
     let err_msg = format!("Failed to delete {}", table.name_snake);
     let not_found_err = format!("{} not found", name);
 

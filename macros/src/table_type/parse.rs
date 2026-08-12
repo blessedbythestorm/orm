@@ -137,6 +137,43 @@ impl TableDef {
     pub fn update_fields(&self) -> impl Iterator<Item = &FieldDef> {
         self.fields.iter().filter(|f| !f.is_update_skip && !f.is_insert_skip)
     }
+
+    pub fn primary_key_name(&self) -> &str {
+        let mut primary_keys = self.fields.iter().filter(|field| field.is_primary);
+        let primary_key = primary_keys.next();
+
+        assert!(
+            primary_key.is_none() || primary_keys.next().is_none(),
+            "{} uses a composite primary key, which single-record CRUD does not support",
+            self.name,
+        );
+
+        primary_key
+            .or_else(|| self.fields.iter().find(|field| field.name_str == "id"))
+            .map(|field| field.name_str.as_str())
+            .unwrap_or_else(|| panic!("{} must declare a #[pg(primary)] field or an id field", self.name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use syn::parse_quote;
+
+    use super::TableDef;
+
+    #[test]
+    fn single_record_crud_uses_the_declared_primary_key() {
+        let item = parse_quote! {
+            #[table_type(schema = "public", name = "profiles", export_to = "types/profiles.ts")]
+            struct Profile {
+                #[pg(primary)]
+                user_id: uuid::Uuid,
+                display_name: String,
+            }
+        };
+
+        assert_eq!(TableDef::parse(&item).primary_key_name(), "user_id");
+    }
 }
 
 impl FieldDef {
