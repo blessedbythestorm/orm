@@ -5,7 +5,11 @@ use tokio_postgres::{Client, NoTls};
 
 use crate::schema::{DatabaseSchema, introspect};
 
-const MIGRATIONS_TABLE: &str = "_orm_migrations";
+// Keep ORM bookkeeping outside the caller's search path. PostgreSQL's default
+// search path starts with a schema named after the current user when one
+// exists, so an unqualified table can resolve to a different schema after a
+// migration creates that schema.
+const MIGRATIONS_TABLE: &str = "public._orm_migrations";
 
 /// A live connection to the target database plus the `_orm_migrations`
 /// bookkeeping the commands need. The background connection task is aborted

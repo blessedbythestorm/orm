@@ -59,7 +59,7 @@ async fn load_columns(
                ON t.table_schema = c.table_schema AND t.table_name = c.table_name
              WHERE t.table_type = 'BASE TABLE'
                AND c.table_schema = ANY($1)
-               AND c.table_name <> '_orm_migrations'
+               AND c.table_name NOT IN ('_orm_migrations', '_orm_seeds')
              ORDER BY c.table_schema, c.table_name, c.ordinal_position",
             &[&schemas],
         )

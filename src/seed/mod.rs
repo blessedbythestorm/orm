@@ -8,7 +8,10 @@ use std::path::Path;
 use anyhow::Context;
 use tokio_postgres::NoTls;
 
-const SEEDS_TABLE: &str = "_orm_seeds";
+// This must remain stable even when migrations create a schema whose name is
+// the same as the database user (the first entry in PostgreSQL's default
+// search path).
+const SEEDS_TABLE: &str = "public._orm_seeds";
 
 const TEMPLATE: &str = "-- Seed: {name}\n\
     -- Applied once and recorded in _orm_seeds. Keep the inserts idempotent\n\
