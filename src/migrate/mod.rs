@@ -76,6 +76,7 @@ pub fn apply(directory: &Path, database_url: Option<String>) -> anyhow::Result<(
     block_on(async move {
         let mut db = Database::connect(&url).await?;
         db.ensure_migrations_table().await?;
+        verify_database_history(&store, &db).await?;
         let applied = db.applied().await?;
 
         let pending: Vec<String> =
