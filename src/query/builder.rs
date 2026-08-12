@@ -103,6 +103,20 @@ pub struct QueryOptions {
     pub offset: Option<u32>,
     pub sort_by: Option<String>,
     pub sort_order: Option<SortOrder>,
+    pub row_lock: Option<RowLock>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RowLock {
+    ForUpdate,
+}
+
+impl RowLock {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::ForUpdate => " FOR UPDATE",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -268,6 +282,11 @@ impl QueryOptions {
         self
     }
 
+    pub fn for_update(mut self) -> Self {
+        self.row_lock = Some(RowLock::ForUpdate);
+        self
+    }
+
     pub fn build_where_clause(&self, param_offset: usize) -> (String, usize) {
         let non_empty_groups: Vec<_> = self.groups.iter().filter(|g| !g.filters.is_empty()).collect();
 
@@ -326,6 +345,9 @@ impl QueryOptions {
         }
         if let Some(offset) = self.offset {
             let _ = write!(sql, " OFFSET {}", offset);
+        }
+        if let Some(row_lock) = self.row_lock {
+            sql.push_str(row_lock.as_sql());
         }
         sql
     }

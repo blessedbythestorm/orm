@@ -25,6 +25,7 @@ fn generate_trait(table: &TableDef) -> TokenStream {
     let create = format_ident!("create_{}", table.name_snake);
     let update = format_ident!("update_{}", table.name_snake);
     let delete = format_ident!("delete_{}", table.name_snake);
+    let delete_all = format_ident!("delete_{}s", table.name_snake);
     let upserts = unique_keys(table).into_iter().map(|columns| {
         let method = upsert_method(table, &columns);
         let selective_method = format_ident!("{}_with", method);
@@ -43,6 +44,7 @@ fn generate_trait(table: &TableDef) -> TokenStream {
             fn #create(&self, data: &#insert_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
             fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
             fn #delete(&self, id: &uuid::Uuid) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+            fn #delete_all(&self, opts: ::orm::query::QueryOptions) -> impl std::future::Future<Output = anyhow::Result<u64>> + Send;
             #(#upserts)*
         }
     }
@@ -60,6 +62,7 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let create = format_ident!("create_{}", table.name_snake);
     let update = format_ident!("update_{}", table.name_snake);
     let delete = format_ident!("delete_{}", table.name_snake);
+    let delete_all = format_ident!("delete_{}s", table.name_snake);
 
     let pool_client = quote! { let client = self.get().await?; };
     let object_client = quote! { let client = self; };
@@ -70,18 +73,21 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let pool_create_body = generate_create(table, &pool_client);
     let pool_update_body = generate_update(table, &pool_client);
     let pool_delete_body = generate_delete(table, &pool_client);
+    let pool_delete_all_body = generate_delete_all(table, &pool_client);
     let object_get_all_body = generate_get_all(table, &object_client);
     let object_count_all_body = generate_count_all(table, &object_client);
     let object_get_one_body = generate_get_one(table, &object_client);
     let object_create_body = generate_create(table, &object_client);
     let object_update_body = generate_update(table, &object_client);
     let object_delete_body = generate_delete(table, &object_client);
+    let object_delete_all_body = generate_delete_all(table, &object_client);
     let transaction_get_all_body = generate_get_all(table, &transaction_client);
     let transaction_count_all_body = generate_count_all(table, &transaction_client);
     let transaction_get_one_body = generate_get_one(table, &transaction_client);
     let transaction_create_body = generate_create(table, &transaction_client);
     let transaction_update_body = generate_update(table, &transaction_client);
     let transaction_delete_body = generate_delete(table, &transaction_client);
+    let transaction_delete_all_body = generate_delete_all(table, &transaction_client);
     let pool_upserts = generate_upsert_impls(table, &pool_client);
     let object_upserts = generate_upsert_impls(table, &object_client);
     let transaction_upserts = generate_upsert_impls(table, &transaction_client);
@@ -112,6 +118,10 @@ fn generate_impl(table: &TableDef) -> TokenStream {
                 #pool_delete_body
             }
 
+            async fn #delete_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<u64> {
+                #pool_delete_all_body
+            }
+
             #(#pool_upserts)*
         }
 
@@ -140,6 +150,10 @@ fn generate_impl(table: &TableDef) -> TokenStream {
                 #object_delete_body
             }
 
+            async fn #delete_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<u64> {
+                #object_delete_all_body
+            }
+
             #(#object_upserts)*
         }
 
@@ -166,6 +180,10 @@ fn generate_impl(table: &TableDef) -> TokenStream {
 
             async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
                 #transaction_delete_body
+            }
+
+            async fn #delete_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<u64> {
+                #transaction_delete_all_body
             }
 
             #(#transaction_upserts)*
@@ -589,5 +607,21 @@ fn generate_delete(table: &TableDef, client_setup: &TokenStream) -> TokenStream 
         }
 
         Ok(())
+    }
+}
+
+fn generate_delete_all(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
+    let full_table = table.full_table_name();
+    let err_msg = format!("Failed to delete {}s", table.name_snake);
+
+    quote! {
+        #client_setup
+        let (where_clause, _) = opts.build_where_clause(1);
+        if where_clause.is_empty() {
+            anyhow::bail!("bulk delete requires at least one filter");
+        }
+        let sql = format!("DELETE FROM {}{}", #full_table, where_clause);
+        client.execute(&sql, &opts.filter_params()).await
+            .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))
     }
 }
