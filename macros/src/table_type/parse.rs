@@ -40,6 +40,7 @@ pub struct FieldDef {
     pub is_optional: bool,
     pub is_auto_generated: bool,
     pub is_insert_skip: bool,
+    pub is_insert_internal: bool,
     pub is_update_skip: bool,
     pub is_primary: bool,
     pub is_unique: bool,
@@ -129,6 +130,10 @@ impl TableDef {
         self.fields.iter().filter(|f| !f.is_insert_skip)
     }
 
+    pub fn client_insert_fields(&self) -> impl Iterator<Item = &FieldDef> {
+        self.insert_fields().filter(|f| !f.is_insert_internal)
+    }
+
     pub fn update_fields(&self) -> impl Iterator<Item = &FieldDef> {
         self.fields.iter().filter(|f| !f.is_update_skip && !f.is_insert_skip)
     }
@@ -148,6 +153,7 @@ impl FieldDef {
         // are optional on insert and excluded from updates.
         let is_auto_generated = pg.primary || crud.insert_optional;
         let is_insert_skip = crud.insert_skip;
+        let is_insert_internal = crud.insert_internal;
         let is_update_skip = pg.primary || crud.update_skip;
 
         Self {
@@ -157,6 +163,7 @@ impl FieldDef {
             is_optional,
             is_auto_generated,
             is_insert_skip,
+            is_insert_internal,
             is_update_skip,
             is_primary: pg.primary,
             is_unique: pg.unique,
@@ -424,11 +431,12 @@ fn parse_column_list(input: ParseStream) -> syn::Result<Vec<String>> {
     Ok(columns)
 }
 
-/// CRUD-struct shaping from `#[crud(insert(optional), insert(skip), update(skip))]`.
+/// CRUD-struct shaping from `#[crud(insert(optional|skip|internal), update(skip))]`.
 #[derive(Default)]
 struct CrudSpec {
     insert_optional: bool,
     insert_skip: bool,
+    insert_internal: bool,
     update_skip: bool,
 }
 
@@ -448,11 +456,12 @@ impl CrudSpec {
                 match (key.to_string().as_str(), value.to_string().as_str()) {
                     ("insert", "optional") => spec.insert_optional = true,
                     ("insert", "skip") => spec.insert_skip = true,
+                    ("insert", "internal") => spec.insert_internal = true,
                     ("update", "skip") => spec.update_skip = true,
                     _ => {
                         return Err(syn::Error::new(
                             key.span(),
-                            "expected insert(optional|skip) or update(skip)",
+                            "expected insert(optional|skip|internal) or update(skip)",
                         ));
                     }
                 }

@@ -12,12 +12,12 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
     let fields = generate_fields(table);
 
     let ts_fields: Vec<crate::export::Field> = table
-        .insert_fields()
+        .client_insert_fields()
         .map(|f| crate::export::Field { name: f.name_str.clone(), ty: f.ty.clone(), forced_optional: f.is_auto_generated })
         .collect();
     let ts_export = crate::export::struct_export(&name.to_string(), export_path, &[], &ts_fields);
 
-    let rule_fields = validation::validation_fields(table.insert_fields(), input, |f| f.is_auto_generated);
+    let rule_fields = validation::validation_fields(table.client_insert_fields(), input, |f| f.is_auto_generated);
     let validation = validation::validation(&name, &rule_fields);
 
     quote! {
