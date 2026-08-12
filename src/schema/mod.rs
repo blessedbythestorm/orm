@@ -9,6 +9,7 @@ pub use diff::{
     ColumnOp, EnumDependent, NoRenames, RenameResolver, SchemaChange, TableOp, diff, invert,
 };
 pub use introspect::introspect;
+pub(crate) use introspect::strip_default_casts;
 pub use model::{
     Column, Constraint, ConstraintKind, DatabaseSchema, EnumType, ForeignKey, Index,
     ReferentialAction, Table, TableReference, View, ViewReference,

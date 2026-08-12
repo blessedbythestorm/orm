@@ -278,6 +278,41 @@ fn adopt_matching_expressions(current: &mut DatabaseSchema, desired: &DatabaseSc
             continue;
         };
 
+        for current_column in current_table.columns.iter_mut() {
+            let Some(desired_column) = desired_table.column(&current_column.name) else {
+                continue;
+            };
+
+            if defaults_equivalent(
+                current_column.default.as_deref(),
+                desired_column.default.as_deref(),
+            ) {
+                current_column.default = desired_column.default.clone();
+            }
+        }
+
+        for desired_constraint in desired_table.constraints.iter() {
+            let ConstraintKind::Unique { columns } = &desired_constraint.kind else {
+                continue;
+            };
+            let [column] = columns.as_slice() else {
+                continue;
+            };
+            let constraint_missing = current_table
+                .constraint(&desired_constraint.name)
+                .is_none();
+            let Some(current_column) = current_table.columns.iter_mut().find(|item| item.name == *column) else {
+                continue;
+            };
+
+            if current_column.unique
+                && constraint_missing
+            {
+                current_column.unique = false;
+                current_table.constraints.push(desired_constraint.clone());
+            }
+        }
+
         for constraint in current_table.constraints.iter_mut() {
             let ConstraintKind::Check { .. } = constraint.kind else {
                 continue;
@@ -302,6 +337,41 @@ fn adopt_matching_expressions(current: &mut DatabaseSchema, desired: &DatabaseSc
                 index.predicate = declared.predicate.clone();
             }
         }
+    }
+}
+
+fn defaults_equivalent(current: Option<&str>, desired: Option<&str>) -> bool {
+    match (current, desired) {
+        (None, None) => true,
+        (Some(current), Some(desired)) => normalize_default(current) == normalize_default(desired),
+        _ => false,
+    }
+}
+
+fn normalize_default(value: &str) -> String {
+    let without_casts = crate::schema::strip_default_casts(value);
+    let value = without_casts.trim();
+
+    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
+        let inner = &value[1..value.len() - 1];
+        if matches!(inner, "true" | "false") || inner.parse::<f64>().is_ok() {
+            return inner.to_owned();
+        }
+    }
+
+    value.to_owned()
+}
+
+#[cfg(test)]
+mod live_diff_tests {
+    use super::defaults_equivalent;
+
+    #[test]
+    fn postgres_default_spellings_compare_equally() {
+        assert!(defaults_equivalent(Some("false"), Some("'false'")));
+        assert!(defaults_equivalent(Some("0"), Some("'0'")));
+        assert!(defaults_equivalent(Some("'[]'"), Some("'[]'::jsonb")));
+        assert!(defaults_equivalent(Some("'{}'"), Some("'{}'::jsonb")));
     }
 }
 

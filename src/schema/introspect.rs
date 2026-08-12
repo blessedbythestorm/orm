@@ -79,7 +79,7 @@ async fn load_columns(
 
         let default = row
             .get::<_, Option<String>>("column_default")
-            .map(|value| strip_casts(&value).trim().to_string());
+            .map(|value| strip_default_casts(&value).trim().to_string());
 
         let qualified = format!("{schema}.{table_name}");
         database
@@ -289,7 +289,7 @@ fn rust_type_name(udt_name: &str) -> String {
 
 /// Removes Postgres `::type` cast suffixes (`'web'::text` → `'web'`,
 /// `nextval('s'::regclass)` → `nextval('s')`) so defaults compare cleanly.
-fn strip_casts(input: &str) -> String {
+pub(crate) fn strip_default_casts(input: &str) -> String {
     let mut output = String::new();
     let mut chars = input.chars().peekable();
     while let Some(character) = chars.next() {
