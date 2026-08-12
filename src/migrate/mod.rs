@@ -59,7 +59,13 @@ pub fn generate_from_database(
     let url = std::env::var(database_url_env)
         .with_context(|| format!("{database_url_env} is not set"))?;
 
-    diff_live(directory, Some(url), Some(name.to_owned()), interactive)
+    let store = MigrationStore::new(directory);
+    block_on(async move {
+        let db = Database::connect(&url).await?;
+        verify_database_history(&store, &db).await
+    })?;
+
+    generate(directory, name, interactive)
 }
 
 /// Applies every migration not yet recorded in `_orm_migrations`.
