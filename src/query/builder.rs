@@ -57,7 +57,18 @@ macro_rules! impl_direct_filter_value {
     )+};
 }
 
-impl_direct_filter_value!(i16, i32, i64, f32, f64, bool, uuid::Uuid);
+impl_direct_filter_value!(
+    i16,
+    i32,
+    i64,
+    f32,
+    f64,
+    bool,
+    uuid::Uuid,
+    chrono::NaiveDate,
+    chrono::NaiveDateTime,
+    chrono::DateTime<chrono::Utc>,
+);
 
 impl<T> FilterValue for Vec<T>
 where
