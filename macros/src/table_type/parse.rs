@@ -182,11 +182,13 @@ mod tests {
             #[table(
                 check("legacy_profiles_active_check" = "active = true"),
                 index(name = "legacy_profiles_owner_idx", unique, owner_id, where = "active = true"),
+                index(name),
             )]
             struct Profile {
                 #[pg(primary)]
                 id: uuid::Uuid,
                 owner_id: uuid::Uuid,
+                name: String,
                 active: bool,
             }
         };
@@ -195,6 +197,7 @@ mod tests {
         assert_eq!(table.constraints[0].name, "legacy_profiles_active_check");
         assert_eq!(table.indexes[0].name, "legacy_profiles_owner_idx");
         assert!(table.indexes[0].unique);
+        assert_eq!(table.indexes[1].name, "profiles_name_idx");
     }
 }
 
@@ -456,7 +459,7 @@ fn parse_index(input: ParseStream, table: &str) -> syn::Result<IndexSpec> {
         } else {
             let ident: Ident = input.parse()?;
 
-            if ident == "name" {
+            if ident == "name" && input.peek(Token![=]) {
                 input.parse::<Token![=]>()?;
                 explicit_name = Some(input.parse::<LitStr>()?.value());
             } else if ident == "unique" {
