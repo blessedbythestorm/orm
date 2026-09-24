@@ -68,6 +68,7 @@ impl_direct_filter_value!(
     chrono::NaiveDate,
     chrono::NaiveDateTime,
     chrono::DateTime<chrono::Utc>,
+    crate::numeric::NumericText,
 );
 
 impl<T> FilterValue for Vec<T>
