@@ -174,6 +174,28 @@ mod tests {
 
         assert_eq!(TableDef::parse(&item).primary_key_name(), "user_id");
     }
+
+    #[test]
+    fn explicit_sql_object_names_preserve_existing_schema_identity() {
+        let item = parse_quote! {
+            #[table_type(schema = "public", name = "profiles", export_to = "types/profiles.ts")]
+            #[table(
+                check("legacy_profiles_active_check" = "active = true"),
+                index(name = "legacy_profiles_owner_idx", unique, owner_id, where = "active = true"),
+            )]
+            struct Profile {
+                #[pg(primary)]
+                id: uuid::Uuid,
+                owner_id: uuid::Uuid,
+                active: bool,
+            }
+        };
+        let table = TableDef::parse(&item);
+
+        assert_eq!(table.constraints[0].name, "legacy_profiles_active_check");
+        assert_eq!(table.indexes[0].name, "legacy_profiles_owner_idx");
+        assert!(table.indexes[0].unique);
+    }
 }
 
 impl FieldDef {
@@ -404,12 +426,17 @@ fn parse_unique(input: ParseStream, table: &str) -> syn::Result<ConstraintSpec> 
 /// `check(positive_weight = "current_kg >= 0")` — the ident names the rule so
 /// the constraint has a stable, readable identity in errors and in the diff.
 fn parse_check(input: ParseStream, table: &str) -> syn::Result<ConstraintSpec> {
-    let label: Ident = input.parse()?;
+    let name = if input.peek(LitStr) {
+        input.parse::<LitStr>()?.value()
+    } else {
+        let label: Ident = input.parse()?;
+        format!("{table}_{label}_check")
+    };
     input.parse::<Token![=]>()?;
     let expression = input.parse::<LitStr>()?.value();
 
     Ok(ConstraintSpec {
-        name: format!("{table}_{label}_check"),
+        name,
         kind: ConstraintKindSpec::Check { expression },
     })
 }
@@ -419,6 +446,7 @@ fn parse_index(input: ParseStream, table: &str) -> syn::Result<IndexSpec> {
     let mut unique = false;
     let mut columns = Vec::new();
     let mut predicate = None;
+    let mut explicit_name = None;
 
     while !input.is_empty() {
         if input.peek(Token![where]) {
@@ -428,7 +456,10 @@ fn parse_index(input: ParseStream, table: &str) -> syn::Result<IndexSpec> {
         } else {
             let ident: Ident = input.parse()?;
 
-            if ident == "unique" {
+            if ident == "name" {
+                input.parse::<Token![=]>()?;
+                explicit_name = Some(input.parse::<LitStr>()?.value());
+            } else if ident == "unique" {
                 unique = true;
             } else {
                 columns.push(ident.to_string());
@@ -447,7 +478,7 @@ fn parse_index(input: ParseStream, table: &str) -> syn::Result<IndexSpec> {
     let suffix = if predicate.is_some() { "partial_idx" } else { "idx" };
 
     Ok(IndexSpec {
-        name: format!("{table}_{}_{suffix}", columns.join("_")),
+        name: explicit_name.unwrap_or_else(|| format!("{table}_{}_{suffix}", columns.join("_"))),
         columns,
         unique,
         predicate,
