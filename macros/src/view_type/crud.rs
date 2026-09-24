@@ -34,10 +34,10 @@ pub fn generate(view: &ViewDef) -> TokenStream {
                 let sql = format!("{}{}{}", #base_sql, where_clause, suffix);
 
                 let rows = client.query(&sql, &opts.filter_params()).await
-                    .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
+                    .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
 
                 rows.iter()
-                    .map(|row| #name::from_row(row).map_err(|e| anyhow::anyhow!("Row parse error: {}", e)))
+                    .map(|row| #name::from_row(row).map_err(|e| anyhow::Error::new(e).context("Row parse error")))
                     .collect()
             }
         }

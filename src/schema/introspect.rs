@@ -2,7 +2,7 @@ use tokio_postgres::Client;
 
 use super::model::{
     Column, Constraint, ConstraintKind, DatabaseSchema, EnumType, ForeignKey, Index,
-    ReferentialAction, Table,
+    ReferentialAction, Table, View,
 };
 
 /// Reads the live schema of the given schemas from the catalog into the same
@@ -16,7 +16,31 @@ pub async fn introspect(client: &Client, schemas: &[String]) -> anyhow::Result<D
     load_columns(client, &names, &mut database).await?;
     load_constraints(client, &names, &mut database).await?;
     load_indexes(client, &names, &mut database).await?;
+    load_views(client, &names, &mut database).await?;
     Ok(database)
+}
+
+async fn load_views(client: &Client, schemas: &[&str], database: &mut DatabaseSchema) -> anyhow::Result<()> {
+    let rows = client
+        .query(
+            "SELECT schemaname, viewname, definition
+             FROM pg_views
+             WHERE schemaname = ANY($1)
+             ORDER BY schemaname, viewname",
+            &[&schemas],
+        )
+        .await?;
+
+    for row in rows {
+        let schema: String = row.get("schemaname");
+        let name: String = row.get("viewname");
+        let definition: String = row.get("definition");
+        let qualified = format!("{schema}.{name}");
+
+        database.views.insert(qualified, View { schema, name, definition });
+    }
+
+    Ok(())
 }
 
 async fn load_enums(client: &Client, schemas: &[&str], database: &mut DatabaseSchema) -> anyhow::Result<()> {

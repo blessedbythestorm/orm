@@ -1,6 +1,8 @@
 mod builder;
+mod locks;
 
 pub use builder::*;
+pub use locks::*;
 
 use crate::api_type;
 

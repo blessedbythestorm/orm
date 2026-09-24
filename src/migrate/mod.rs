@@ -321,15 +321,15 @@ fn resolver(interactive: bool) -> Box<dyn RenameResolver> {
     if interactive { Box::new(Prompt) } else { Box::new(NoRenames) }
 }
 
-/// Copies the declared text of check constraints and index predicates onto the
-/// introspected schema wherever the two agree on name and shape.
+/// Copies declared defaults, check and index expressions, and view definitions
+/// onto introspected objects with the same identity.
 ///
 /// Postgres rewrites an expression when it stores it — `current_kg >= 0` comes
 /// back as `current_kg >= (0)::double precision` — so comparing the declared
 /// text against the catalog's would report drift on every run and never
 /// converge. Names are the identity here; a real change to an expression is
-/// made under a new name or by dropping the old rule. Only `diff_live` needs
-/// this: `generate` diffs against our own snapshot, where the text round-trips.
+/// made under a new name or by dropping the old rule. For views, this verifies
+/// presence, while declared SQL changes are diffed against the prior snapshot.
 fn adopt_matching_expressions(current: &mut DatabaseSchema, desired: &DatabaseSchema) {
     use crate::schema::{ConstraintKind, Table};
 
@@ -398,6 +398,12 @@ fn adopt_matching_expressions(current: &mut DatabaseSchema, desired: &DatabaseSc
             }
         }
     }
+
+    for (name, current_view) in current.views.iter_mut() {
+        if let Some(declared) = desired.views.get(name) {
+            current_view.definition = declared.definition.clone();
+        }
+    }
 }
 
 fn defaults_equivalent(current: Option<&str>, desired: Option<&str>) -> bool {
@@ -424,7 +430,8 @@ fn normalize_default(value: &str) -> String {
 
 #[cfg(test)]
 mod live_diff_tests {
-    use super::defaults_equivalent;
+    use super::{adopt_matching_expressions, defaults_equivalent};
+    use crate::schema::{DatabaseSchema, View};
 
     #[test]
     fn postgres_default_spellings_compare_equally() {
@@ -432,6 +439,29 @@ mod live_diff_tests {
         assert!(defaults_equivalent(Some("0"), Some("'0'")));
         assert!(defaults_equivalent(Some("'[]'"), Some("'[]'::jsonb")));
         assert!(defaults_equivalent(Some("'{}'"), Some("'{}'::jsonb")));
+    }
+
+    #[test]
+    fn matching_views_adopt_declared_sql_after_postgres_reformats_it() {
+        let declared = View {
+            schema: "app".to_string(),
+            name: "summary".to_string(),
+            definition: "SELECT id FROM app.items".to_string(),
+        };
+        let mut actual = declared.clone();
+        actual.definition = " SELECT items.id\n FROM app.items;".to_string();
+        let expected = DatabaseSchema {
+            views: [("app.summary".to_string(), declared.clone())].into_iter().collect(),
+            ..Default::default()
+        };
+        let mut current = DatabaseSchema {
+            views: [("app.summary".to_string(), actual)].into_iter().collect(),
+            ..Default::default()
+        };
+
+        adopt_matching_expressions(&mut current, &expected);
+
+        assert_eq!(current.views.get("app.summary"), Some(&declared));
     }
 }
 

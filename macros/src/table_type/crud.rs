@@ -328,10 +328,10 @@ fn generate_selective_upsert(
         );
 
         let row = client.query_one(&sql, &params).await
-            .map_err(|error| anyhow::anyhow!(concat!(#err_msg, ": {}"), error))?;
+            .map_err(|error| anyhow::Error::new(error).context(#err_msg))?;
 
         #name::from_row(&row)
-            .map_err(|error| anyhow::anyhow!("Row parse error: {}", error))
+            .map_err(|error| anyhow::Error::new(error).context("Row parse error"))
     }
 }
 
@@ -410,10 +410,10 @@ fn generate_upsert(
         );
 
         let row = client.query_one(&sql, &params).await
-            .map_err(|error| anyhow::anyhow!(concat!(#err_msg, ": {}"), error))?;
+            .map_err(|error| anyhow::Error::new(error).context(#err_msg))?;
 
         #name::from_row(&row)
-            .map_err(|error| anyhow::anyhow!("Row parse error: {}", error))
+            .map_err(|error| anyhow::Error::new(error).context("Row parse error"))
     }
 }
 
@@ -433,10 +433,10 @@ fn generate_get_all(table: &TableDef, client_setup: &TokenStream) -> TokenStream
         let sql = format!("{}{}{}", #base_sql, where_clause, suffix);
 
         let rows = client.query(&sql, &opts.filter_params()).await
-            .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
+            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
 
         rows.iter()
-            .map(|row| #name::from_row(row).map_err(|e| anyhow::anyhow!("Row parse error: {}", e)))
+            .map(|row| #name::from_row(row).map_err(|e| anyhow::Error::new(e).context("Row parse error")))
             .collect()
     }
 }
@@ -450,9 +450,9 @@ fn generate_count_all(table: &TableDef, client_setup: &TokenStream) -> TokenStre
         let (where_clause, _) = opts.build_where_clause(1);
         let sql = format!("SELECT COUNT(*) AS count FROM {}{}", #full_table, where_clause);
         let row = client.query_one(&sql, &opts.filter_params()).await
-            .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
+            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
         row.try_get::<_, i64>("count")
-            .map_err(|e| anyhow::anyhow!("Count parse error: {}", e))
+            .map_err(|e| anyhow::Error::new(e).context("Count parse error"))
     }
 }
 
@@ -469,9 +469,9 @@ fn generate_get_one(table: &TableDef, client_setup: &TokenStream) -> TokenStream
 
         #client_setup
         let row = client.query_one(#sql, &[id]).await
-            .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
+            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
 
-        #name::from_row(&row).map_err(|e| anyhow::anyhow!("Row parse error: {}", e))
+        #name::from_row(&row).map_err(|e| anyhow::Error::new(e).context("Row parse error"))
     }
 }
 
@@ -526,9 +526,9 @@ fn generate_create(table: &TableDef, client_setup: &TokenStream) -> TokenStream 
         };
 
         let row = client.query_one(&sql, &params).await
-            .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
+            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
 
-        #name::from_row(&row).map_err(|e| anyhow::anyhow!("Row parse error: {}", e))
+        #name::from_row(&row).map_err(|e| anyhow::Error::new(e).context("Row parse error"))
     }
 }
 
@@ -586,9 +586,9 @@ fn generate_update(table: &TableDef, client_setup: &TokenStream) -> TokenStream 
         params.push(id);
 
         let row = client.query_one(&sql, &params).await
-            .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
+            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
 
-        #name::from_row(&row).map_err(|e| anyhow::anyhow!("Row parse error: {}", e))
+        #name::from_row(&row).map_err(|e| anyhow::Error::new(e).context("Row parse error"))
     }
 }
 
@@ -603,7 +603,7 @@ fn generate_delete(table: &TableDef, client_setup: &TokenStream) -> TokenStream 
     quote! {
         #client_setup
         let result = client.execute(#sql, &[id]).await
-            .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))?;
+            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
 
         if result == 0 {
             anyhow::bail!(#not_found_err);
@@ -625,6 +625,6 @@ fn generate_delete_all(table: &TableDef, client_setup: &TokenStream) -> TokenStr
         }
         let sql = format!("DELETE FROM {}{}", #full_table, where_clause);
         client.execute(&sql, &opts.filter_params()).await
-            .map_err(|e| anyhow::anyhow!(concat!(#err_msg, ": {}"), e))
+            .map_err(|e| anyhow::Error::new(e).context(#err_msg))
     }
 }

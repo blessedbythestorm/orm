@@ -103,18 +103,21 @@ pub struct QueryOptions {
     pub offset: Option<u32>,
     pub sort_by: Option<String>,
     pub sort_order: Option<SortOrder>,
+    pub secondary_sorts: Vec<QuerySort>,
     pub row_lock: Option<RowLock>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum RowLock {
     ForUpdate,
+    ForShare,
 }
 
 impl RowLock {
     fn as_sql(self) -> &'static str {
         match self {
             Self::ForUpdate => " FOR UPDATE",
+            Self::ForShare => " FOR SHARE",
         }
     }
 }
@@ -262,6 +265,17 @@ impl QueryOptions {
     pub fn sort(mut self, sort: QuerySort) -> Self {
         self.sort_by = Some(sort.field);
         self.sort_order = Some(sort.order);
+        self.secondary_sorts.clear();
+        self
+    }
+
+    pub fn then_sort(mut self, sort: QuerySort) -> Self {
+        if self.sort_by.is_none() {
+            self.sort_by = Some(sort.field);
+            self.sort_order = Some(sort.order);
+        } else {
+            self.secondary_sorts.push(sort);
+        }
         self
     }
 
@@ -284,6 +298,11 @@ impl QueryOptions {
 
     pub fn for_update(mut self) -> Self {
         self.row_lock = Some(RowLock::ForUpdate);
+        self
+    }
+
+    pub fn for_share(mut self) -> Self {
+        self.row_lock = Some(RowLock::ForShare);
         self
     }
 
@@ -339,6 +358,11 @@ impl QueryOptions {
         let mut sql = String::new();
         if let Some(field) = self.sort_by.as_deref().filter(|field| is_identifier(field)) {
             let _ = write!(sql, " ORDER BY {} {}", field, self.sort_order.unwrap_or_default().as_str());
+            for sort in &self.secondary_sorts {
+                if is_identifier(&sort.field) {
+                    let _ = write!(sql, ", {} {}", sort.field, sort.order.as_str());
+                }
+            }
         }
         if let Some(limit) = self.limit {
             let _ = write!(sql, " LIMIT {}", limit);

@@ -64,6 +64,37 @@ fn suffix_renders_order_limit_offset() {
 }
 
 #[test]
+fn secondary_sort_preserves_primary_order_and_ignores_invalid_columns() {
+    let suffix = QueryOptions::new()
+        .sort(QuerySort::new("created_at", SortOrder::Desc))
+        .then_sort(QuerySort::new("id", SortOrder::Desc))
+        .then_sort(QuerySort::new("unsafe; drop table", SortOrder::Asc))
+        .limit(10)
+        .to_sql_suffix();
+
+    assert_eq!(suffix, " ORDER BY created_at DESC, id DESC LIMIT 10");
+}
+
+#[test]
+fn secondary_sort_can_start_an_ordering() {
+    let suffix = QueryOptions::new()
+        .then_sort(QuerySort::new("id", SortOrder::Asc))
+        .to_sql_suffix();
+
+    assert_eq!(suffix, " ORDER BY id ASC");
+}
+
+#[test]
+fn share_lock_renders_after_limit() {
+    let suffix = QueryOptions::new()
+        .limit(1)
+        .for_share()
+        .to_sql_suffix();
+
+    assert_eq!(suffix, " LIMIT 1 FOR SHARE");
+}
+
+#[test]
 fn like_ops_wrap_the_value_with_wildcards() {
     assert_eq!(FilterOp::Like.wrap_value("ana"), "%ana%");
     assert_eq!(FilterOp::ILike.wrap_value("ana"), "%ana%");
