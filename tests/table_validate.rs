@@ -62,6 +62,22 @@ fn update_checks_only_provided_fields() {
 
     let bad = GadgetUpdate { name: Some("ab".into()), contact: None };
     assert!(bad.validate().is_err());
+
+    let bad_contact = GadgetUpdate {
+        name: None,
+        contact: Some(Some("not-an-email".into())),
+    };
+    assert!(bad_contact.validate().is_err());
+
+    let omitted: GadgetUpdate = serde_json::from_str("{}").expect("omitted patch");
+    assert_eq!(omitted.contact, None);
+
+    let cleared: GadgetUpdate = serde_json::from_str(r#"{"contact":null}"#).expect("clear patch");
+    assert_eq!(cleared.contact, Some(None));
+
+    let replaced: GadgetUpdate = serde_json::from_str(r#"{"contact":"ana@example.com"}"#)
+        .expect("replacement patch");
+    assert_eq!(replaced.contact, Some(Some("ana@example.com".into())));
 }
 
 #[test]

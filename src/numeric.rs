@@ -17,7 +17,7 @@ pub struct NumericText(String);
 
 impl NumericText {
     pub fn new(value: impl Into<String>) -> Result<Self, &'static str> {
-        let value = value.into();
+        let mut value = value.into();
         let unsigned = value.strip_prefix('-').unwrap_or(&value);
         let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
 
@@ -27,6 +27,12 @@ impl NumericText {
             || !fraction.bytes().all(|byte| byte.is_ascii_digit())
         {
             return Err("expected a plain decimal string");
+        }
+
+        if value.starts_with('-')
+            && whole.bytes().chain(fraction.bytes()).all(|byte| byte == b'0')
+        {
+            value.remove(0);
         }
 
         Ok(Self(value))
@@ -65,7 +71,64 @@ impl SqlType for NumericText {
 
 impl ToSql for NumericText {
     fn to_sql(&self, _: &Type, output: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        output.extend_from_slice(self.0.as_bytes());
+        let negative = self.0.starts_with('-');
+        let unsigned = self.0.strip_prefix('-').unwrap_or(&self.0);
+        let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+        let whole_padding = (4 - whole.len() % 4) % 4;
+        let fraction_padding = (4 - fraction.len() % 4) % 4;
+        let mut padded = String::with_capacity(
+            whole_padding + whole.len() + fraction.len() + fraction_padding,
+        );
+        padded.extend(std::iter::repeat_n('0', whole_padding));
+        padded.push_str(whole);
+        padded.push_str(fraction);
+        padded.extend(std::iter::repeat_n('0', fraction_padding));
+
+        let mut digits = padded
+            .as_bytes()
+            .chunks_exact(4)
+            .map(|chunk| std::str::from_utf8(chunk)
+                .map_err(|_| IoError::new(ErrorKind::InvalidData, "invalid decimal digits"))?
+                .parse::<i16>()
+                .map_err(|_| IoError::new(ErrorKind::InvalidData, "invalid decimal digits")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let whole_groups = (whole_padding + whole.len()) / 4;
+        let mut weight = whole_groups as i32 - 1;
+
+        while digits.first() == Some(&0) {
+            digits.remove(0);
+            weight -= 1;
+        }
+
+        while digits.last() == Some(&0) {
+            digits.pop();
+        }
+
+        let count = i16::try_from(digits.len())
+            .map_err(|_| IoError::new(ErrorKind::InvalidInput, "decimal has too many base-10000 digits"))?;
+        let weight = if digits.is_empty() {
+            0_i16
+        } else {
+            i16::try_from(weight)
+                .map_err(|_| IoError::new(ErrorKind::InvalidInput, "decimal magnitude is unsupported"))?
+        };
+        let scale = u16::try_from(fraction.len())
+            .map_err(|_| IoError::new(ErrorKind::InvalidInput, "decimal scale is unsupported"))?;
+        let sign = if negative && digits.iter().any(|digit| *digit != 0) {
+            0x4000_u16
+        } else {
+            0x0000_u16
+        };
+
+        output.extend_from_slice(&count.to_be_bytes());
+        output.extend_from_slice(&weight.to_be_bytes());
+        output.extend_from_slice(&sign.to_be_bytes());
+        output.extend_from_slice(&scale.to_be_bytes());
+
+        for digit in digits {
+            output.extend_from_slice(&digit.to_be_bytes());
+        }
+
         Ok(IsNull::No)
     }
 
@@ -74,7 +137,7 @@ impl ToSql for NumericText {
     }
 
     fn encode_format(&self, _: &Type) -> Format {
-        Format::Text
+        Format::Binary
     }
 
     to_sql_checked!();
@@ -97,16 +160,8 @@ impl<'a> FromSql<'a> for NumericText {
             return Err(invalid().into());
         }
 
-        let special = match sign {
-            0xC000 => Some("NaN"),
-            0xD000 => Some("Infinity"),
-            0xF000 => Some("-Infinity"),
-            0x0000 | 0x4000 => None,
-            _ => return Err(invalid().into()),
-        };
-
-        if let Some(special) = special {
-            return Ok(Self(special.to_string()));
+        if !matches!(sign, 0x0000 | 0x4000) {
+            return Err(invalid().into());
         }
 
         let digits = raw[8..]

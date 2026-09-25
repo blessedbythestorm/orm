@@ -655,6 +655,7 @@ fn generate_delete_all(table: &TableDef, client_setup: &TokenStream) -> TokenStr
 
     quote! {
         #client_setup
+        opts.validate_for_filtered_write()?;
         let (where_clause, _) = opts.build_where_clause(1);
         if where_clause.is_empty() {
             anyhow::bail!("bulk delete requires at least one filter");
@@ -708,6 +709,7 @@ fn generate_update_where(table: &TableDef, client_setup: &TokenStream) -> TokenS
         use ::orm::FromRow;
 
         #client_setup
+        opts.validate_for_filtered_write()?;
         let allowed_columns = &[#(#allowed_columns),*];
         let (set_clause, next_param) = values.build(1, allowed_columns)?;
         let (where_clause, _) = opts.build_where_clause(next_param);

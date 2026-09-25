@@ -53,6 +53,18 @@ fn null_check_consumes_no_param() {
 }
 
 #[test]
+fn null_helpers_need_no_dummy_value() {
+    let options = QueryOptions::new()
+        .is_null("deleted_at")
+        .is_not_null("confirmed_at");
+    let (sql, next) = options.build_where_clause(4);
+
+    assert_eq!(sql, " WHERE deleted_at IS NULL AND confirmed_at IS NOT NULL");
+    assert_eq!(next, 4);
+    assert!(options.filter_params().is_empty());
+}
+
+#[test]
 fn suffix_renders_order_limit_offset() {
     let suffix = QueryOptions::new()
         .sort(QuerySort::new("created_at", SortOrder::Desc))
@@ -92,6 +104,24 @@ fn share_lock_renders_after_limit() {
         .to_sql_suffix();
 
     assert_eq!(suffix, " LIMIT 1 FOR SHARE");
+}
+
+#[test]
+fn filtered_writes_reject_read_only_controls() {
+    for options in [
+        QueryOptions::new().limit(1),
+        QueryOptions::new().offset(1),
+        QueryOptions::new().sort(QuerySort::new("created_at", SortOrder::Asc)),
+        QueryOptions::new().for_update(),
+        QueryOptions::new().for_share(),
+    ] {
+        assert!(options.validate_for_filtered_write().is_err());
+    }
+
+    assert!(QueryOptions::new()
+        .filter("id", FilterOp::Eq, uuid::Uuid::new_v4())
+        .validate_for_filtered_write()
+        .is_ok());
 }
 
 #[test]

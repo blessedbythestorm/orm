@@ -6,6 +6,7 @@ fn numeric_text_accepts_plain_decimals_only() {
     for value in ["0", "0.0000000000000000001", "123456789012345678901234567890", "-10.25"] {
         assert_eq!(NumericText::new(value).expect("valid decimal").as_str(), value);
     }
+    assert_eq!(NumericText::new("-0.000").expect("negative zero").as_str(), "0.000");
 
     for value in ["", "-", ".1", "1.", "1e5", "1.2.3", "NaN", "Infinity"] {
         assert!(NumericText::new(value).is_err(), "accepted {value}");
@@ -31,6 +32,7 @@ async fn numeric_text_round_trips_through_postgres_without_floating_point() {
 
     for value in [
         "0",
+        "-0.0000",
         "0.0000000000000000001",
         "123456789012345678901234567890.12345678901234567890",
         "-987654321.0000000001",
@@ -43,7 +45,31 @@ async fn numeric_text_round_trips_through_postgres_without_floating_point() {
             .expect("query numeric");
         let actual: NumericText = row.get("amount");
 
-        assert_eq!(actual.as_str(), value);
+        assert_eq!(actual, parameter);
+    }
+
+    let values = vec![
+        NumericText::new("0.0000000000000000001").expect("small decimal"),
+        NumericText::new("12345678901234567890.1250").expect("large decimal"),
+        NumericText::new("-9.75").expect("negative decimal"),
+    ];
+    let row = client
+        .query_one("SELECT $1::numeric[] AS amounts", &[&values])
+        .await
+        .expect("query numeric array");
+    let actual: Vec<NumericText> = row.get("amounts");
+    assert_eq!(actual, values);
+
+    for query in [
+        "SELECT 'NaN'::numeric AS amount",
+        "SELECT 'Infinity'::numeric AS amount",
+        "SELECT '-Infinity'::numeric AS amount",
+    ] {
+        let row = client
+            .query_one(query, &[])
+            .await
+            .expect("query special numeric");
+        assert!(row.try_get::<_, NumericText>("amount").is_err());
     }
 
     conn.abort();

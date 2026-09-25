@@ -37,9 +37,9 @@ pub fn generate(name: &Ident, generics: &Generics, fields: &Fields) -> TokenStre
             }
             let ident = field.ident.clone().expect("named field");
             let field_str = ident.to_string();
-            let optional = is_option(&field.ty);
+            let optional_depth = option_depth(&field.ty);
             for rule in &rules {
-                checks.push(rule_check(rule, &ident, &field_str, optional));
+                checks.push(rule_check(rule, &ident, &field_str, optional_depth));
             }
         }
     }
@@ -64,13 +64,13 @@ pub fn generate(name: &Ident, generics: &Generics, fields: &Fields) -> TokenStre
 
 /// Builds the check for one rule on `self.#ident` (wrapping `Option<_>` fields so
 /// only the inner value is checked when present).
-fn rule_check(rule: &Rule, ident: &Ident, field: &str, optional: bool) -> TokenStream {
-    let recv = if optional { quote!(__inner) } else { quote!(self.#ident) };
+fn rule_check(rule: &Rule, ident: &Ident, field: &str, optional_depth: usize) -> TokenStream {
+    let recv = if optional_depth > 0 { quote!(__inner) } else { quote!(self.#ident) };
 
     // Rules that don't fit the plain `if !<bool> { add }` shape.
     match rule {
         Rule::Required => {
-            return if optional {
+            return if optional_depth > 0 {
                 let err = make_error("required", "is required");
                 quote! { if self.#ident.is_none() { __errors.add(#field, #err); } }
             } else {
@@ -92,7 +92,7 @@ fn rule_check(rule: &Rule, ident: &Ident, field: &str, optional: bool) -> TokenS
                     }
                 }
             };
-            return wrap_optional(check, ident, optional);
+            return wrap_optional(check, ident, optional_depth);
         }
         _ => {}
     }
@@ -117,14 +117,25 @@ fn rule_check(rule: &Rule, ident: &Ident, field: &str, optional: bool) -> TokenS
     };
 
     let err = make_error(code, &message);
-    wrap_optional(quote! { if !#passed { __errors.add(#field, #err); } }, ident, optional)
+    wrap_optional(quote! { if !#passed { __errors.add(#field, #err); } }, ident, optional_depth)
 }
 
-fn wrap_optional(check: TokenStream, ident: &Ident, optional: bool) -> TokenStream {
-    if optional {
-        quote! { if let ::std::option::Option::Some(__inner) = &self.#ident { #check } }
-    } else {
-        check
+fn wrap_optional(check: TokenStream, ident: &Ident, optional_depth: usize) -> TokenStream {
+    match optional_depth {
+        0 => check,
+        1 => quote! {
+            if let ::std::option::Option::Some(__inner) = &self.#ident {
+                #check
+            }
+        },
+        2 => quote! {
+            if let ::std::option::Option::Some(__outer) = &self.#ident {
+                if let ::std::option::Option::Some(__inner) = __outer {
+                    #check
+                }
+            }
+        },
+        _ => quote! { compile_error!("validation supports at most two Option layers"); },
     }
 }
 
@@ -172,8 +183,26 @@ fn range_message(min: &Option<LitInt>, max: &Option<LitInt>) -> String {
     }
 }
 
-fn is_option(ty: &Type) -> bool {
-    matches!(ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Option"))
+fn option_depth(ty: &Type) -> usize {
+    let Type::Path(path) = ty else {
+        return 0;
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return 0;
+    };
+
+    if segment.ident != "Option" {
+        return 0;
+    }
+
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return 1;
+    };
+    let Some(syn::GenericArgument::Type(inner)) = arguments.args.first() else {
+        return 1;
+    };
+
+    1 + option_depth(inner)
 }
 
 /// Collects rules from every `#[api(validate(...))]` on a field.

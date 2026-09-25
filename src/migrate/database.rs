@@ -57,6 +57,31 @@ impl Database {
         introspect(&self.client, schemas).await
     }
 
+    /// Uses PostgreSQL's own parser and planner to compare two SELECT
+    /// definitions without executing either query.
+    pub async fn queries_have_same_plan(&self, left: &str, right: &str) -> anyhow::Result<bool> {
+        let left = self.query_plan(left).await?;
+        let right = self.query_plan(right).await?;
+
+        Ok(left == right)
+    }
+
+    async fn query_plan(&self, query: &str) -> anyhow::Result<serde_json::Value> {
+        let sql = format!("EXPLAIN (VERBOSE, COSTS FALSE, FORMAT JSON) {query}");
+        let row = self.client
+            .query_one(&sql, &[])
+            .await
+            .context("planning schema expression")?;
+
+        Ok(row.get(0))
+    }
+
+    #[cfg(test)]
+    pub async fn execute_test_sql(&self, sql: &str) -> anyhow::Result<()> {
+        self.client.batch_execute(sql).await?;
+        Ok(())
+    }
+
     /// Records a migration as applied without running its SQL (used by baseline).
     pub async fn record_applied(&self, stem: &str) -> anyhow::Result<()> {
         self.client.execute(&format!("INSERT INTO {MIGRATIONS_TABLE} (name) VALUES ($1)"), &[&stem]).await?;
@@ -79,6 +104,35 @@ impl Database {
         transaction.execute(&format!("DELETE FROM {MIGRATIONS_TABLE} WHERE name = $1"), &[&stem]).await?;
         transaction.commit().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+
+    #[tokio::test]
+    async fn query_plans_ignore_formatting_but_detect_changed_predicates() {
+        let Ok(url) = std::env::var("ORM_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set ORM_TEST_DATABASE_URL to run the query plan test");
+            return;
+        };
+        let database = Database::connect(&url).await.expect("connect");
+
+        assert!(database
+            .queries_have_same_plan(
+                "SELECT oid FROM pg_catalog.pg_class WHERE relkind = 'r'",
+                " SELECT pg_class.oid FROM pg_catalog.pg_class WHERE (relkind = 'r');",
+            )
+            .await
+            .expect("compare equivalent plans"));
+        assert!(!database
+            .queries_have_same_plan(
+                "SELECT oid FROM pg_catalog.pg_class WHERE relkind = 'r'",
+                "SELECT oid FROM pg_catalog.pg_class WHERE relkind = 'v'",
+            )
+            .await
+            .expect("compare changed plans"));
     }
 }
 

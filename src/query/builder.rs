@@ -140,8 +140,26 @@ impl FilterGroup {
 
     pub fn filter<T: FilterValue>(mut self, field: impl Into<String>, op: FilterOp, value: T) -> Self {
         if let Some(converted) = value.into_filter_value(op) {
-            self.filters.push(Filter { field: field.into(), op, value: converted });
+            self.filters.push(Filter { field: field.into(), op, value: Some(converted) });
         }
+        self
+    }
+
+    pub fn is_null(mut self, field: impl Into<String>) -> Self {
+        self.filters.push(Filter {
+            field: field.into(),
+            op: FilterOp::IsNull,
+            value: None,
+        });
+        self
+    }
+
+    pub fn is_not_null(mut self, field: impl Into<String>) -> Self {
+        self.filters.push(Filter {
+            field: field.into(),
+            op: FilterOp::IsNotNull,
+            value: None,
+        });
         self
     }
 }
@@ -157,7 +175,7 @@ impl From<Search> for FilterGroup {
                 continue;
             }
             if let Some(converted) = query.clone().into_filter_value(FilterOp::ILike) {
-                group.filters.push(Filter { field, op: FilterOp::ILike, value: converted });
+                group.filters.push(Filter { field, op: FilterOp::ILike, value: Some(converted) });
             }
         }
         group
@@ -168,7 +186,7 @@ impl From<Search> for FilterGroup {
 pub struct Filter {
     pub field: String,
     pub op: FilterOp,
-    pub value: Arc<dyn ToSql + Send + Sync>,
+    pub value: Option<Arc<dyn ToSql + Send + Sync>>,
 }
 
 #[allow(dead_code)]
@@ -286,10 +304,20 @@ impl QueryOptions {
     pub fn filter<T: FilterValue>(mut self, field: impl Into<String>, op: FilterOp, value: T) -> Self {
         if let Some(converted) = value.into_filter_value(op) {
             self.groups.push(FilterGroup {
-                filters: vec![Filter { field: field.into(), op, value: converted }],
+                filters: vec![Filter { field: field.into(), op, value: Some(converted) }],
                 op: LogicalOp::And,
             });
         }
+        self
+    }
+
+    pub fn is_null(mut self, field: impl Into<String>) -> Self {
+        self.groups.push(FilterGroup::and().is_null(field));
+        self
+    }
+
+    pub fn is_not_null(mut self, field: impl Into<String>) -> Self {
+        self.groups.push(FilterGroup::and().is_not_null(field));
         self
     }
 
@@ -308,6 +336,24 @@ impl QueryOptions {
     pub fn for_share(mut self) -> Self {
         self.row_lock = Some(RowLock::ForShare);
         self
+    }
+
+    /// Rejects read-only controls before an UPDATE or DELETE uses these
+    /// options as a predicate. Silently ignoring them could affect more rows
+    /// than the caller selected.
+    pub fn validate_for_filtered_write(&self) -> anyhow::Result<()> {
+        if self.limit.is_some()
+            || self.offset.is_some()
+            || self.sort_by.is_some()
+            || !self.secondary_sorts.is_empty()
+            || self.row_lock.is_some()
+        {
+            anyhow::bail!(
+                "filtered writes accept predicates only; sorting, pagination, and row locks are unsupported"
+            );
+        }
+
+        Ok(())
     }
 
     pub fn build_where_clause(&self, param_offset: usize) -> (String, usize) {
@@ -355,8 +401,9 @@ impl QueryOptions {
         self.groups
             .iter()
             .flat_map(|g| g.filters.iter())
-            .filter(|f| f.op.needs_value())
-            .map(|f| f.value.as_ref() as &(dyn ToSql + Sync))
+            .filter_map(|f| f.value
+                .as_deref()
+                .map(|value| value as &(dyn ToSql + Sync)))
             .collect()
     }
 

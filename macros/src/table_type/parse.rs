@@ -243,6 +243,12 @@ impl FieldDef {
             quote! { Option<#ty> }
         }
     }
+
+    pub fn as_update_type(&self) -> TokenStream {
+        let ty = &self.ty;
+
+        quote! { Option<#ty> }
+    }
 }
 
 impl TableConfig {

@@ -179,8 +179,9 @@ Each key also has a selective `_with` variant that accepts an update value and
 changes only its populated fields, for example
 `upsert_account_by_email_with(&insert, &update)`.
 
-Generated CRUD assumes an `id: uuid::Uuid` column and uses `WHERE id = $1`.
-For another key shape, use `FromRow`/`QueryExt` or write a repository manually.
+Generated CRUD respects the column marked `#[pg(primary)]`, but its
+single-record method signatures currently require a UUID key. For another key
+type, use `FromRow`/`QueryExt` or write a repository manually.
 The database must provide defaults for generated columns such as the primary
 key and `created_at`.
 
@@ -197,7 +198,15 @@ Useful field attributes are:
 
 `Option<T>` maps to a nullable column. Built-in `SqlType` mappings include
 `bool`, integer/float types, `String`, `Vec<u8>`, `uuid::Uuid`, common `chrono`
-types, and `serde_json::Value`. Custom enum and JSON types are covered below.
+types, `serde_json::Value`, and `NumericText`. `NumericText` carries finite
+PostgreSQL `numeric` values as decimal strings, including inside `IN` and
+`NOT IN` filters, without converting through floating point.
+
+Generated update DTOs distinguish all three nullable-field states: omission
+leaves the column unchanged, JSON `null` clears it, and a value replaces it.
+In Rust, a nullable update field is `Option<Option<T>>`; use `None`,
+`Some(None)`, and `Some(Some(value))` respectively. Exported TypeScript keeps
+the equivalent `field?: T | null` contract.
 
 ### `#[enum_type]`: PostgreSQL enums
 
@@ -361,11 +370,31 @@ let account = transaction.create_account(&payload).await?;
 transaction.commit().await?;
 ```
 
+Use `.is_null("deleted_at")` and `.is_not_null("confirmed_at")` for NULL
+predicates without a dummy filter value. `.then_sort(...)` appends deterministic
+secondary ordering. `.for_update()` and `.for_share()` add row locks; use them
+on a transaction when the lock must live beyond the SELECT statement.
+
+For server-managed or conditionally populated fields, generated CRUD exposes
+`insert_<table>_fields(InsertValues)` and
+`update_<tables>_where(QueryOptions, UpdateValues)`. Values remain bound and
+column names are checked against the model at runtime. `UpdateValues` supports
+assignment, addition, subtraction, NULL, and database time. These builders are
+dynamic rather than compile-time column/value typed.
+
+Filtered update and bulk delete accept predicates only. Passing sorting,
+pagination, or row-lock controls returns an error before SQL executes; those
+controls are never silently discarded. Both operations also reject an empty
+predicate. If a bounded write is needed, select and lock explicit identities in
+a transaction, then update those identities.
+
 `FilterOp::In` and `FilterOp::NotIn` accept vectors and bind them as a single
 PostgreSQL array (`= ANY($n)` / `<> ALL($n)`). Values are parameterized. Field
 names, sort names, and raw view/table SQL are
 not; whitelist any identifier derived from user input. Built-in filter values
 are strings, `i32`, `bool`, `Uuid`, `Option<T>`, and `#[enum_type]` enums.
+`FilterOp::EqInsensitive` performs case-insensitive equality without adding the
+wildcards used by `ILike`.
 
 ## TypeScript generation
 
@@ -428,6 +457,11 @@ environment rather than appearing in the command line.
 `migrate revert` runs the latest down migration and removes its files. Review
 generated SQL before applying it; ambiguous renames are interactive by default,
 and enum values cannot be removed by the generated down migration.
+
+Live drift checks compare PostgreSQL plans for declared and introspected view,
+check-constraint, and partial-index expressions. Formatting changes are
+accepted only when PostgreSQL plans both expressions equivalently; changing a
+predicate is reported as drift.
 
 ## Lower-level schema APIs
 

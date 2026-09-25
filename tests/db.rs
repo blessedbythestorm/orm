@@ -2,6 +2,7 @@
 //! unset the test returns early, so `cargo test` stays green without a database;
 //! set it to a throwaway Postgres to actually exercise apply + introspect.
 
+use orm::numeric::NumericText;
 use orm::schema::{Column, DatabaseSchema, NoRenames, Table, diff, introspect, render};
 use orm::table_type;
 use orm::query::{FilterOp, InsertValues, QueryOptions, UpdateValues};
@@ -16,6 +17,8 @@ pub struct ErrorWidget {
     pub id: Uuid,
     #[pg(unique)]
     pub code: String,
+    pub amount: NumericText,
+    pub note: Option<String>,
 }
 
 #[tokio::test]
@@ -31,13 +34,18 @@ async fn generated_create_keeps_constraint_error_source() {
     });
 
     client
-        .batch_execute("DROP SCHEMA IF EXISTS orm_error_test CASCADE; CREATE SCHEMA orm_error_test; CREATE TABLE orm_error_test.widgets (id uuid PRIMARY KEY, code text NOT NULL UNIQUE);")
+        .batch_execute("DROP SCHEMA IF EXISTS orm_error_test CASCADE; CREATE SCHEMA orm_error_test; CREATE TABLE orm_error_test.widgets (id uuid PRIMARY KEY, code text NOT NULL UNIQUE, amount numeric NOT NULL, note text);")
         .await
         .expect("create error fixture");
 
     let transaction = client.transaction().await.expect("begin");
     transaction
-        .create_error_widget(&ErrorWidgetInsert { id: Some(Uuid::new_v4()), code: "same".into() })
+        .create_error_widget(&ErrorWidgetInsert {
+            id: Some(Uuid::new_v4()),
+            code: "same".into(),
+            amount: NumericText::new("1.25").expect("amount"),
+            note: Some("keep".into()),
+        })
         .await
         .expect("first create");
     let shared = transaction
@@ -56,7 +64,9 @@ async fn generated_create_keeps_constraint_error_source() {
         .insert_error_widget_fields(
             InsertValues::new()
                 .value("id", dynamic_id)
-                .value("code", "dynamic".to_string()),
+                .value("code", "dynamic".to_string())
+                .value("amount", NumericText::new("2.50").expect("amount"))
+                .value("note", "clear me".to_string()),
         )
         .await
         .expect("dynamic insert");
@@ -71,6 +81,64 @@ async fn generated_create_keeps_constraint_error_source() {
         .expect("filtered update");
     assert_eq!(changed.len(), 1);
     assert_eq!(changed[0].code, "changed");
+
+    let numeric_matches = transaction
+        .get_error_widgets(
+            QueryOptions::new()
+                .filter(
+                    "amount",
+                    FilterOp::In,
+                    vec![NumericText::new("2.500").expect("array amount")],
+                ),
+        )
+        .await
+        .expect("numeric array filter");
+    assert_eq!(numeric_matches.len(), 1);
+    assert_eq!(numeric_matches[0].id, dynamic_id);
+
+    let cleared = transaction
+        .update_error_widget(
+            &dynamic_id,
+            &ErrorWidgetUpdate {
+                code: None,
+                amount: None,
+                note: Some(None),
+            },
+        )
+        .await
+        .expect("clear nullable generated field");
+    assert_eq!(cleared.note, None);
+
+    let bounded_update = transaction
+        .update_error_widgets_where(
+            QueryOptions::new()
+                .filter("code", FilterOp::Eq, "changed")
+                .limit(1),
+            UpdateValues::new()
+                .assign("code", "must-not-change".to_string()),
+        )
+        .await
+        .expect_err("filtered update must reject read pagination");
+    assert!(bounded_update.to_string().contains("predicates only"));
+
+    let bounded_delete = transaction
+        .delete_error_widgets(
+            QueryOptions::new()
+                .filter("code", FilterOp::Eq, "changed")
+                .limit(1),
+        )
+        .await
+        .expect_err("filtered delete must reject read pagination");
+    assert!(bounded_delete.to_string().contains("predicates only"));
+
+    let unchanged = transaction
+        .get_error_widgets(
+            QueryOptions::new()
+                .filter("id", FilterOp::Eq, dynamic_id),
+        )
+        .await
+        .expect("read unchanged dynamic row");
+    assert_eq!(unchanged[0].code, "changed");
 
     let (observer, observer_connection) = tokio_postgres::connect(&url, NoTls).await.expect("observer connect");
     let observer_task = tokio::spawn(async move {
@@ -98,7 +166,12 @@ async fn generated_create_keeps_constraint_error_source() {
     assert!(!numeric_lock_available);
 
     let error = transaction
-        .create_error_widget(&ErrorWidgetInsert { id: Some(Uuid::new_v4()), code: "same".into() })
+        .create_error_widget(&ErrorWidgetInsert {
+            id: Some(Uuid::new_v4()),
+            code: "same".into(),
+            amount: NumericText::new("3").expect("amount"),
+            note: None,
+        })
         .await
         .expect_err("duplicate code");
     let postgres = error

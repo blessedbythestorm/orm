@@ -17,7 +17,7 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
         .collect();
     let ts_export = crate::export::struct_export(&name.to_string(), export_path, &[], &ts_fields);
 
-    let rule_fields = validation::validation_fields(table.update_fields(), input, |_| true);
+    let rule_fields = validation::update_validation_fields(table.update_fields(), input);
     let validation = validation::validation(&name, &rule_fields);
 
     quote! {
@@ -37,10 +37,22 @@ fn generate_fields(table: &TableDef) -> Vec<TokenStream> {
         .update_fields()
         .map(|f| {
             let name = &f.name;
-            let ty = f.as_option_type();
+            let ty = f.as_update_type();
 
-            quote! {
-                pub #name: #ty
+            if f.is_optional {
+                quote! {
+                    #[serde(
+                        default,
+                        deserialize_with = "::orm::deserialize_nullable_patch",
+                        skip_serializing_if = "Option::is_none"
+                    )]
+                    pub #name: #ty
+                }
+            } else {
+                quote! {
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    pub #name: #ty
+                }
             }
         })
         .collect()

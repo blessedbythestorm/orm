@@ -17,6 +17,7 @@ pub mod export;
 pub mod lang;
 pub mod migrate;
 pub mod numeric;
+mod patch;
 pub mod query;
 pub mod registry;
 pub mod schema;
@@ -28,5 +29,6 @@ pub mod validator;
 
 pub use export::{ExportBackend, ExportType, export_all_types};
 pub use macros::{api_type, endpoint, enum_type, json_type, table_type, view_type};
+pub use patch::deserialize_nullable_patch;
 pub use traits::{FromRow, QueryExt};
 pub use validate::{Valid, Validate, ValidationError, ValidationErrors};

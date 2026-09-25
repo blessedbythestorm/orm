@@ -188,7 +188,7 @@ pub fn diff_live(
         let db = Database::connect(&url).await?;
         verify_database_history(&store, &db).await?;
         let mut current = db.introspect(&owned_schemas(&desired)).await?;
-        adopt_matching_expressions(&mut current, &desired);
+        adopt_matching_expressions(&db, &mut current, &desired).await?;
 
         // Same resolver as `generate`, so a renamed column is offered as a rename
         // (data-preserving) instead of a destructive drop + add.
@@ -256,7 +256,7 @@ async fn verify_database_history(store: &MigrationStore, db: &Database) -> anyho
         None => DatabaseSchema::default(),
     };
     let mut current = db.introspect(&owned_schemas(&expected)).await?;
-    adopt_matching_expressions(&mut current, &expected);
+    adopt_matching_expressions(db, &mut current, &expected).await?;
     let drift = diff(&current, &expected, &mut NoRenames);
     if !drift.is_empty() {
         anyhow::bail!(
@@ -330,7 +330,11 @@ fn resolver(interactive: bool) -> Box<dyn RenameResolver> {
 /// converge. Names are the identity here; a real change to an expression is
 /// made under a new name or by dropping the old rule. For views, this verifies
 /// presence, while declared SQL changes are diffed against the prior snapshot.
-fn adopt_matching_expressions(current: &mut DatabaseSchema, desired: &DatabaseSchema) {
+async fn adopt_matching_expressions(
+    db: &Database,
+    current: &mut DatabaseSchema,
+    desired: &DatabaseSchema,
+) -> anyhow::Result<()> {
     use crate::schema::{ConstraintKind, Table};
 
     for (name, current_table) in current.tables.iter_mut() {
@@ -382,7 +386,26 @@ fn adopt_matching_expressions(current: &mut DatabaseSchema, desired: &DatabaseSc
                 continue;
             };
 
-            if matches!(declared.kind, ConstraintKind::Check { .. }) {
+            let ConstraintKind::Check { expression: current_expression } = &constraint.kind else {
+                continue;
+            };
+            let ConstraintKind::Check { expression: declared_expression } = &declared.kind else {
+                continue;
+            };
+            let current_query = format!(
+                "SELECT 1 FROM {}.{} WHERE {}",
+                current_table.schema,
+                current_table.name,
+                current_expression,
+            );
+            let declared_query = format!(
+                "SELECT 1 FROM {}.{} WHERE {}",
+                current_table.schema,
+                current_table.name,
+                declared_expression,
+            );
+
+            if db.queries_have_same_plan(&current_query, &declared_query).await? {
                 constraint.kind = declared.kind.clone();
             }
         }
@@ -392,7 +415,27 @@ fn adopt_matching_expressions(current: &mut DatabaseSchema, desired: &DatabaseSc
                 continue;
             };
 
-            if index.predicate.is_some() && declared.predicate.is_some() && index.columns == declared.columns
+            let (Some(current_predicate), Some(declared_predicate)) =
+                (&index.predicate, &declared.predicate)
+            else {
+                continue;
+            };
+
+            if index.columns == declared.columns
+                && db.queries_have_same_plan(
+                    &format!(
+                        "SELECT 1 FROM {}.{} WHERE {}",
+                        current_table.schema,
+                        current_table.name,
+                        current_predicate,
+                    ),
+                    &format!(
+                        "SELECT 1 FROM {}.{} WHERE {}",
+                        current_table.schema,
+                        current_table.name,
+                        declared_predicate,
+                    ),
+                ).await?
             {
                 index.predicate = declared.predicate.clone();
             }
@@ -400,10 +443,17 @@ fn adopt_matching_expressions(current: &mut DatabaseSchema, desired: &DatabaseSc
     }
 
     for (name, current_view) in current.views.iter_mut() {
-        if let Some(declared) = desired.views.get(name) {
+        if let Some(declared) = desired.views.get(name)
+            && db.queries_have_same_plan(
+                &current_view.definition,
+                &declared.definition,
+            ).await?
+        {
             current_view.definition = declared.definition.clone();
         }
     }
+
+    Ok(())
 }
 
 fn defaults_equivalent(current: Option<&str>, desired: Option<&str>) -> bool {
@@ -430,7 +480,7 @@ fn normalize_default(value: &str) -> String {
 
 #[cfg(test)]
 mod live_diff_tests {
-    use super::{adopt_matching_expressions, defaults_equivalent};
+    use super::{Database, adopt_matching_expressions, defaults_equivalent};
     use crate::schema::{DatabaseSchema, View};
 
     #[test]
@@ -441,27 +491,62 @@ mod live_diff_tests {
         assert!(defaults_equivalent(Some("'{}'"), Some("'{}'::jsonb")));
     }
 
-    #[test]
-    fn matching_views_adopt_declared_sql_after_postgres_reformats_it() {
-        let declared = View {
-            schema: "app".to_string(),
-            name: "summary".to_string(),
-            definition: "SELECT id FROM app.items".to_string(),
+    #[tokio::test]
+    async fn view_adoption_requires_an_equivalent_postgres_plan() {
+        let Ok(url) = std::env::var("ORM_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set ORM_TEST_DATABASE_URL to run the view drift test");
+            return;
         };
-        let mut actual = declared.clone();
-        actual.definition = " SELECT items.id\n FROM app.items;".to_string();
+        let database = Database::connect(&url).await.expect("connect");
+        database
+            .execute_test_sql(
+                "DROP SCHEMA IF EXISTS orm_view_plan_test CASCADE;
+                 CREATE SCHEMA orm_view_plan_test;
+                 CREATE TABLE orm_view_plan_test.items (id uuid PRIMARY KEY, active boolean NOT NULL);",
+            )
+            .await
+            .expect("create view plan fixture");
+        let declared = View {
+            schema: "orm_view_plan_test".to_string(),
+            name: "active_items".to_string(),
+            definition: "SELECT id FROM orm_view_plan_test.items WHERE active = true".to_string(),
+        };
+        let changed = View {
+            definition: "SELECT items.id FROM orm_view_plan_test.items WHERE active = false".to_string(),
+            ..declared.clone()
+        };
         let expected = DatabaseSchema {
-            views: [("app.summary".to_string(), declared.clone())].into_iter().collect(),
+            views: [(declared.qualified_name(), declared.clone())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
         let mut current = DatabaseSchema {
-            views: [("app.summary".to_string(), actual)].into_iter().collect(),
+            views: [(changed.qualified_name(), changed.clone())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
 
-        adopt_matching_expressions(&mut current, &expected);
+        adopt_matching_expressions(&database, &mut current, &expected)
+            .await
+            .expect("compare changed view");
+        assert_eq!(current.views.get("orm_view_plan_test.active_items"), Some(&changed));
 
-        assert_eq!(current.views.get("app.summary"), Some(&declared));
+        let reformatted = View {
+            definition: " SELECT items.id FROM orm_view_plan_test.items WHERE (items.active = true);".to_string(),
+            ..declared.clone()
+        };
+        current.views.insert(reformatted.qualified_name(), reformatted);
+        adopt_matching_expressions(&database, &mut current, &expected)
+            .await
+            .expect("compare equivalent view");
+        assert_eq!(current.views.get("orm_view_plan_test.active_items"), Some(&declared));
+
+        database
+            .execute_test_sql("DROP SCHEMA orm_view_plan_test CASCADE;")
+            .await
+            .expect("drop view plan fixture");
     }
 }
 

@@ -39,6 +39,26 @@ pub fn validation_fields<'a>(
     Fields::Named(FieldsNamed { brace_token: Default::default(), named })
 }
 
+pub fn update_validation_fields<'a>(
+    defs: impl Iterator<Item = &'a FieldDef>,
+    input: &ItemStruct,
+) -> Fields {
+    let mut named: Punctuated<Field, syn::Token![,]> = Punctuated::new();
+
+    for def in defs {
+        let Some(original) = original_field(input, &def.name) else {
+            continue;
+        };
+
+        let mut field = original.clone();
+        field.attrs.retain(|attr| attr.path().is_ident("api"));
+        field.ty = syn::parse2(def.as_update_type()).expect("update field type");
+        named.push(field);
+    }
+
+    Fields::Named(FieldsNamed { brace_token: Default::default(), named })
+}
+
 /// The `Validate` impl plus the registered validator schema for a derived
 /// struct, generated from its synthetic fields.
 pub fn validation(name: &Ident, fields: &Fields) -> TokenStream {
