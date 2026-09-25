@@ -4,7 +4,7 @@
 
 use orm::schema::{Column, DatabaseSchema, NoRenames, Table, diff, introspect, render};
 use orm::table_type;
-use orm::query::{FilterOp, QueryOptions};
+use orm::query::{FilterOp, InsertValues, QueryOptions, UpdateValues};
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
@@ -50,6 +50,27 @@ async fn generated_create_keeps_constraint_error_source() {
         .await
         .expect("shared lock query");
     assert_eq!(shared.len(), 1);
+
+    let dynamic_id = Uuid::new_v4();
+    transaction
+        .insert_error_widget_fields(
+            InsertValues::new()
+                .value("id", dynamic_id)
+                .value("code", "dynamic".to_string()),
+        )
+        .await
+        .expect("dynamic insert");
+    let changed = transaction
+        .update_error_widgets_where(
+            QueryOptions::new()
+                .filter("id", FilterOp::Eq, dynamic_id),
+            UpdateValues::new()
+                .assign("code", "changed".to_string()),
+        )
+        .await
+        .expect("filtered update");
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].code, "changed");
 
     let (observer, observer_connection) = tokio_postgres::connect(&url, NoTls).await.expect("observer connect");
     let observer_task = tokio::spawn(async move {

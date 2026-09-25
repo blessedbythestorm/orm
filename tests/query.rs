@@ -1,4 +1,4 @@
-use orm::query::{FilterGroup, FilterOp, QueryOptions, QuerySort, SortOrder};
+use orm::query::{FilterGroup, FilterOp, InsertValues, QueryOptions, QuerySort, SortOrder, UpdateValues};
 
 #[test]
 fn no_filters_means_no_where() {
@@ -183,4 +183,55 @@ fn from_params_sorts_by_a_valid_field() {
     );
 
     assert!(options.to_sql_suffix().contains(" ORDER BY created_at DESC"));
+}
+
+#[test]
+fn insert_values_accept_only_known_columns() {
+    let values = InsertValues::new()
+        .value("name", "Press 1".to_string())
+        .value("active", true);
+    let (columns, placeholders) = values
+        .build(&["name", "active"])
+        .unwrap();
+
+    assert_eq!(columns, "name, active");
+    assert_eq!(placeholders, "$1, $2");
+    assert_eq!(values.params().len(), 2);
+    assert!(InsertValues::new()
+        .value("unknown", true)
+        .build(&["active"])
+        .is_err());
+}
+
+#[test]
+fn update_values_build_bound_arithmetic_and_database_values() {
+    let values = UpdateValues::new()
+        .assign("status", "posted".to_string())
+        .add("version", 1_i64)
+        .subtract("balance", 4.5_f64)
+        .database_now("posted_at")
+        .null("voided_at");
+    let (sql, next) = values
+        .build(3, &["status", "version", "balance", "posted_at", "voided_at"])
+        .unwrap();
+
+    assert_eq!(
+        sql,
+        "status = $3, version = version + $4, balance = balance - $5, posted_at = now(), voided_at = NULL",
+    );
+    assert_eq!(next, 6);
+    assert_eq!(values.params().len(), 3);
+}
+
+#[test]
+fn write_values_reject_duplicate_and_unsafe_columns() {
+    assert!(UpdateValues::new()
+        .assign("status", "open".to_string())
+        .assign("status", "closed".to_string())
+        .build(1, &["status"])
+        .is_err());
+    assert!(UpdateValues::new()
+        .assign("status = 'closed'", true)
+        .build(1, &["status"])
+        .is_err());
 }

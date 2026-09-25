@@ -26,6 +26,8 @@ fn generate_trait(table: &TableDef) -> TokenStream {
     let update = format_ident!("update_{}", table.name_snake);
     let delete = format_ident!("delete_{}", table.name_snake);
     let delete_all = format_ident!("delete_{}s", table.name_snake);
+    let insert_fields = format_ident!("insert_{}_fields", table.name_snake);
+    let update_where = format_ident!("update_{}s_where", table.name_snake);
     let upserts = unique_keys(table).into_iter().map(|columns| {
         let method = upsert_method(table, &columns);
         let selective_method = format_ident!("{}_with", method);
@@ -45,6 +47,8 @@ fn generate_trait(table: &TableDef) -> TokenStream {
             fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
             fn #delete(&self, id: &uuid::Uuid) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
             fn #delete_all(&self, opts: ::orm::query::QueryOptions) -> impl std::future::Future<Output = anyhow::Result<u64>> + Send;
+            fn #insert_fields(&self, values: ::orm::query::InsertValues) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
+            fn #update_where(&self, opts: ::orm::query::QueryOptions, values: ::orm::query::UpdateValues) -> impl std::future::Future<Output = anyhow::Result<Vec<#name>>> + Send;
             #(#upserts)*
         }
     }
@@ -63,6 +67,8 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let update = format_ident!("update_{}", table.name_snake);
     let delete = format_ident!("delete_{}", table.name_snake);
     let delete_all = format_ident!("delete_{}s", table.name_snake);
+    let insert_fields = format_ident!("insert_{}_fields", table.name_snake);
+    let update_where = format_ident!("update_{}s_where", table.name_snake);
 
     let pool_client = quote! { let client = self.get().await?; };
     let object_client = quote! { let client = self; };
@@ -88,6 +94,12 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let transaction_update_body = generate_update(table, &transaction_client);
     let transaction_delete_body = generate_delete(table, &transaction_client);
     let transaction_delete_all_body = generate_delete_all(table, &transaction_client);
+    let pool_insert_fields_body = generate_insert_fields(table, &pool_client);
+    let object_insert_fields_body = generate_insert_fields(table, &object_client);
+    let transaction_insert_fields_body = generate_insert_fields(table, &transaction_client);
+    let pool_update_where_body = generate_update_where(table, &pool_client);
+    let object_update_where_body = generate_update_where(table, &object_client);
+    let transaction_update_where_body = generate_update_where(table, &transaction_client);
     let pool_upserts = generate_upsert_impls(table, &pool_client);
     let object_upserts = generate_upsert_impls(table, &object_client);
     let transaction_upserts = generate_upsert_impls(table, &transaction_client);
@@ -122,6 +134,14 @@ fn generate_impl(table: &TableDef) -> TokenStream {
                 #pool_delete_all_body
             }
 
+            async fn #insert_fields(&self, values: ::orm::query::InsertValues) -> anyhow::Result<#name> {
+                #pool_insert_fields_body
+            }
+
+            async fn #update_where(&self, opts: ::orm::query::QueryOptions, values: ::orm::query::UpdateValues) -> anyhow::Result<Vec<#name>> {
+                #pool_update_where_body
+            }
+
             #(#pool_upserts)*
         }
 
@@ -154,6 +174,14 @@ fn generate_impl(table: &TableDef) -> TokenStream {
                 #object_delete_all_body
             }
 
+            async fn #insert_fields(&self, values: ::orm::query::InsertValues) -> anyhow::Result<#name> {
+                #object_insert_fields_body
+            }
+
+            async fn #update_where(&self, opts: ::orm::query::QueryOptions, values: ::orm::query::UpdateValues) -> anyhow::Result<Vec<#name>> {
+                #object_update_where_body
+            }
+
             #(#object_upserts)*
         }
 
@@ -184,6 +212,14 @@ fn generate_impl(table: &TableDef) -> TokenStream {
 
             async fn #delete_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<u64> {
                 #transaction_delete_all_body
+            }
+
+            async fn #insert_fields(&self, values: ::orm::query::InsertValues) -> anyhow::Result<#name> {
+                #transaction_insert_fields_body
+            }
+
+            async fn #update_where(&self, opts: ::orm::query::QueryOptions, values: ::orm::query::UpdateValues) -> anyhow::Result<Vec<#name>> {
+                #transaction_update_where_body
             }
 
             #(#transaction_upserts)*
@@ -626,5 +662,74 @@ fn generate_delete_all(table: &TableDef, client_setup: &TokenStream) -> TokenStr
         let sql = format!("DELETE FROM {}{}", #full_table, where_clause);
         client.execute(&sql, &opts.filter_params()).await
             .map_err(|e| anyhow::Error::new(e).context(#err_msg))
+    }
+}
+
+fn generate_insert_fields(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
+    let name = &table.name;
+    let full_table = table.full_table_name();
+    let columns = table.column_list();
+    let allowed_columns = table.fields.iter().map(|field| field.name_str.as_str());
+    let err_msg = format!("Failed to insert {} fields", table.name_snake);
+
+    quote! {
+        use ::orm::FromRow;
+
+        #client_setup
+        let allowed_columns = &[#(#allowed_columns),*];
+        let sql = if values.is_empty() {
+            format!("INSERT INTO {} DEFAULT VALUES RETURNING {}", #full_table, #columns)
+        } else {
+            let (insert_columns, placeholders) = values.build(allowed_columns)?;
+            format!(
+                "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+                #full_table,
+                insert_columns,
+                placeholders,
+                #columns,
+            )
+        };
+        let row = client.query_one(&sql, &values.params()).await
+            .map_err(|error| anyhow::Error::new(error).context(#err_msg))?;
+
+        #name::from_row(&row)
+            .map_err(|error| anyhow::Error::new(error).context("Row parse error"))
+    }
+}
+
+fn generate_update_where(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
+    let name = &table.name;
+    let full_table = table.full_table_name();
+    let columns = table.column_list();
+    let allowed_columns = table.fields.iter().map(|field| field.name_str.as_str());
+    let err_msg = format!("Failed to update filtered {}s", table.name_snake);
+
+    quote! {
+        use ::orm::FromRow;
+
+        #client_setup
+        let allowed_columns = &[#(#allowed_columns),*];
+        let (set_clause, next_param) = values.build(1, allowed_columns)?;
+        let (where_clause, _) = opts.build_where_clause(next_param);
+
+        if where_clause.is_empty() {
+            anyhow::bail!("filtered update requires at least one filter");
+        }
+
+        let sql = format!(
+            "UPDATE {} SET {}{} RETURNING {}",
+            #full_table,
+            set_clause,
+            where_clause,
+            #columns,
+        );
+        let mut params = values.params();
+        params.extend(opts.filter_params());
+        let rows = client.query(&sql, &params).await
+            .map_err(|error| anyhow::Error::new(error).context(#err_msg))?;
+
+        rows.iter()
+            .map(|row| #name::from_row(row).map_err(|error| anyhow::Error::new(error).context("Row parse error")))
+            .collect()
     }
 }

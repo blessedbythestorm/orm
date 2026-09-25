@@ -1,8 +1,10 @@
 mod builder;
 mod locks;
+mod write;
 
 pub use builder::*;
 pub use locks::*;
+pub use write::*;
 
 use crate::api_type;
 

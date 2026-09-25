@@ -14,7 +14,7 @@ const DEFAULT_LIMIT: u32 = 50;
 /// True when `field` is a plain column identifier, safe to interpolate into
 /// SQL. Field names arriving from query parameters (sort, search fields) must
 /// pass this before they reach `ORDER BY` or `WHERE`.
-fn is_identifier(field: &str) -> bool {
+pub(crate) fn is_identifier(field: &str) -> bool {
     let mut chars = field.chars();
 
     let starts_ok = chars
