@@ -458,10 +458,12 @@ environment rather than appearing in the command line.
 generated SQL before applying it; ambiguous renames are interactive by default,
 and enum values cannot be removed by the generated down migration.
 
-Live drift checks compare PostgreSQL plans for declared and introspected view,
-check-constraint, and partial-index expressions. Formatting changes are
-accepted only when PostgreSQL plans both expressions equivalently; changing a
-predicate is reported as drift.
+Live drift checks round-trip declared view, check-constraint, and partial-index
+expressions through temporary PostgreSQL objects in rolled-back transactions.
+The stored definitions are compared with the live catalog definitions. This
+accepts PostgreSQL's formatting of equivalent declarations while preserving
+view output names and check-constraint null behavior. If a declaration cannot
+be normalized, verification fails instead of reporting that the schema matches.
 
 ## Lower-level schema APIs
 

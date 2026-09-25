@@ -321,15 +321,8 @@ fn resolver(interactive: bool) -> Box<dyn RenameResolver> {
     if interactive { Box::new(Prompt) } else { Box::new(NoRenames) }
 }
 
-/// Copies declared defaults, check and index expressions, and view definitions
-/// onto introspected objects with the same identity.
-///
-/// Postgres rewrites an expression when it stores it — `current_kg >= 0` comes
-/// back as `current_kg >= (0)::double precision` — so comparing the declared
-/// text against the catalog's would report drift on every run and never
-/// converge. Names are the identity here; a real change to an expression is
-/// made under a new name or by dropping the old rule. For views, this verifies
-/// presence, while declared SQL changes are diffed against the prior snapshot.
+/// Adopts declared expression spelling only after comparing PostgreSQL's
+/// catalog-normalized representation with the live definition.
 async fn adopt_matching_expressions(
     db: &Database,
     current: &mut DatabaseSchema,
@@ -392,20 +385,12 @@ async fn adopt_matching_expressions(
             let ConstraintKind::Check { expression: declared_expression } = &declared.kind else {
                 continue;
             };
-            let current_query = format!(
-                "SELECT 1 FROM {}.{} WHERE {}",
-                current_table.schema,
-                current_table.name,
-                current_expression,
-            );
-            let declared_query = format!(
-                "SELECT 1 FROM {}.{} WHERE {}",
-                current_table.schema,
-                current_table.name,
-                declared_expression,
-            );
+            let declared_canonical = db
+                .canonical_check(&current_table.schema, &current_table.name, declared_expression)
+                .await
+                .with_context(|| format!("verifying CHECK {} on {name}", constraint.name))?;
 
-            if db.queries_have_same_plan(&current_query, &declared_query).await? {
+            if *current_expression == declared_canonical {
                 constraint.kind = declared.kind.clone();
             }
         }
@@ -421,35 +406,36 @@ async fn adopt_matching_expressions(
                 continue;
             };
 
-            if index.columns == declared.columns
-                && db.queries_have_same_plan(
-                    &format!(
-                        "SELECT 1 FROM {}.{} WHERE {}",
-                        current_table.schema,
-                        current_table.name,
-                        current_predicate,
-                    ),
-                    &format!(
-                        "SELECT 1 FROM {}.{} WHERE {}",
-                        current_table.schema,
-                        current_table.name,
-                        declared_predicate,
-                    ),
-                ).await?
-            {
+            if index.columns != declared.columns || index.unique != declared.unique {
+                continue;
+            }
+
+            let declared_canonical = db
+                .canonical_index_predicate(
+                    &current_table.schema,
+                    &current_table.name,
+                    &declared.columns,
+                    declared_predicate,
+                )
+                .await
+                .with_context(|| format!("verifying partial index {} on {name}", index.name))?;
+
+            if *current_predicate == declared_canonical {
                 index.predicate = declared.predicate.clone();
             }
         }
     }
 
     for (name, current_view) in current.views.iter_mut() {
-        if let Some(declared) = desired.views.get(name)
-            && db.queries_have_same_plan(
-                &current_view.definition,
-                &declared.definition,
-            ).await?
-        {
-            current_view.definition = declared.definition.clone();
+        if let Some(declared) = desired.views.get(name) {
+            let declared_canonical = db
+                .canonical_view(&declared.definition)
+                .await
+                .with_context(|| format!("verifying view {name}"))?;
+
+            if current_view.definition == declared_canonical {
+                current_view.definition = declared.definition.clone();
+            }
         }
     }
 
@@ -492,7 +478,7 @@ mod live_diff_tests {
     }
 
     #[tokio::test]
-    async fn view_adoption_requires_an_equivalent_postgres_plan() {
+    async fn view_adoption_requires_the_same_catalog_definition() {
         let Ok(url) = std::env::var("ORM_TEST_DATABASE_URL") else {
             eprintln!("skipping: set ORM_TEST_DATABASE_URL to run the view drift test");
             return;
@@ -502,7 +488,8 @@ mod live_diff_tests {
             .execute_test_sql(
                 "DROP SCHEMA IF EXISTS orm_view_plan_test CASCADE;
                  CREATE SCHEMA orm_view_plan_test;
-                 CREATE TABLE orm_view_plan_test.items (id uuid PRIMARY KEY, active boolean NOT NULL);",
+                 CREATE TABLE orm_view_plan_test.items (id uuid PRIMARY KEY, active boolean NOT NULL);
+                 CREATE VIEW orm_view_plan_test.active_items AS SELECT id FROM orm_view_plan_test.items WHERE active = false;",
             )
             .await
             .expect("create view plan fixture");
@@ -511,33 +498,33 @@ mod live_diff_tests {
             name: "active_items".to_string(),
             definition: "SELECT id FROM orm_view_plan_test.items WHERE active = true".to_string(),
         };
-        let changed = View {
-            definition: "SELECT items.id FROM orm_view_plan_test.items WHERE active = false".to_string(),
-            ..declared.clone()
-        };
         let expected = DatabaseSchema {
             views: [(declared.qualified_name(), declared.clone())]
                 .into_iter()
                 .collect(),
             ..Default::default()
         };
-        let mut current = DatabaseSchema {
-            views: [(changed.qualified_name(), changed.clone())]
-                .into_iter()
-                .collect(),
-            ..Default::default()
-        };
+        let mut current = database
+            .introspect(&["orm_view_plan_test".to_string()])
+            .await
+            .expect("introspect changed view");
+        let changed = current.views.get("orm_view_plan_test.active_items").cloned();
 
         adopt_matching_expressions(&database, &mut current, &expected)
             .await
             .expect("compare changed view");
-        assert_eq!(current.views.get("orm_view_plan_test.active_items"), Some(&changed));
+        assert_eq!(current.views.get("orm_view_plan_test.active_items"), changed.as_ref());
 
-        let reformatted = View {
-            definition: " SELECT items.id FROM orm_view_plan_test.items WHERE (items.active = true);".to_string(),
-            ..declared.clone()
-        };
-        current.views.insert(reformatted.qualified_name(), reformatted);
+        database
+            .execute_test_sql(
+                "CREATE OR REPLACE VIEW orm_view_plan_test.active_items AS SELECT items.id FROM orm_view_plan_test.items WHERE (items.active = true);",
+            )
+            .await
+            .expect("replace view");
+        let mut current = database
+            .introspect(&["orm_view_plan_test".to_string()])
+            .await
+            .expect("introspect equivalent view");
         adopt_matching_expressions(&database, &mut current, &expected)
             .await
             .expect("compare equivalent view");

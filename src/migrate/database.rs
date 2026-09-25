@@ -57,23 +57,92 @@ impl Database {
         introspect(&self.client, schemas).await
     }
 
-    /// Uses PostgreSQL's own parser and planner to compare two SELECT
-    /// definitions without executing either query.
-    pub async fn queries_have_same_plan(&self, left: &str, right: &str) -> anyhow::Result<bool> {
-        let left = self.query_plan(left).await?;
-        let right = self.query_plan(right).await?;
+    /// Round-trips a declared view through PostgreSQL's catalog deparser.
+    pub async fn canonical_view(&self, definition: &str) -> anyhow::Result<String> {
+        let name = format!("_orm_compare_{}", uuid::Uuid::new_v4().simple());
+        let qualified = format!("pg_temp.{name}");
+        let create = format!("CREATE TEMP VIEW {name} AS {definition}");
 
-        Ok(left == right)
+        self.canonical_expression(
+            &create,
+            "SELECT pg_get_viewdef($1::text::regclass)",
+            &qualified,
+        )
+        .await
     }
 
-    async fn query_plan(&self, query: &str) -> anyhow::Result<serde_json::Value> {
-        let sql = format!("EXPLAIN (VERBOSE, COSTS FALSE, FORMAT JSON) {query}");
-        let row = self.client
-            .query_one(&sql, &[])
-            .await
-            .context("planning schema expression")?;
+    /// Round-trips a declared CHECK against the live table's column types.
+    pub async fn canonical_check(
+        &self,
+        schema: &str,
+        table: &str,
+        expression: &str,
+    ) -> anyhow::Result<String> {
+        let name = format!("_orm_compare_{}", uuid::Uuid::new_v4().simple());
+        let qualified = format!("pg_temp.{name}");
+        let create = format!(
+            "CREATE TEMP TABLE {name} (LIKE {}.{}); ALTER TABLE {name} ADD CONSTRAINT {name}_check CHECK ({expression})",
+            schema,
+            table,
+        );
 
-        Ok(row.get(0))
+        self.canonical_expression(
+            &create,
+            "SELECT pg_get_expr(conbin, conrelid) FROM pg_constraint WHERE conrelid = $1::text::regclass AND contype = 'c'",
+            &qualified,
+        )
+        .await
+    }
+
+    /// Round-trips a partial-index predicate against the live table's column types.
+    pub async fn canonical_index_predicate(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        predicate: &str,
+    ) -> anyhow::Result<String> {
+        let name = format!("_orm_compare_{}", uuid::Uuid::new_v4().simple());
+        let qualified = format!("pg_temp.{name}_index");
+        let create = format!(
+            "CREATE TEMP TABLE {name} (LIKE {}.{}); CREATE INDEX {name}_index ON {name} ({}) WHERE {predicate}",
+            schema,
+            table,
+            columns.join(", "),
+        );
+
+        self.canonical_expression(
+            &create,
+            "SELECT pg_get_expr(indpred, indrelid) FROM pg_index WHERE indexrelid = $1::text::regclass",
+            &qualified,
+        )
+        .await
+    }
+
+    async fn canonical_expression(
+        &self,
+        create: &str,
+        lookup: &str,
+        qualified: &str,
+    ) -> anyhow::Result<String> {
+        self.client.batch_execute("BEGIN").await?;
+
+        let result = async {
+            self.client
+                .batch_execute(create)
+                .await
+                .context("creating temporary schema expression")?;
+            let row = self.client
+                .query_one(lookup, &[&qualified])
+                .await
+                .context("reading canonical schema expression")?;
+
+            Ok(row.get(0))
+        }
+        .await;
+
+        self.client.batch_execute("ROLLBACK").await?;
+        result
     }
 
     #[cfg(test)]
@@ -104,35 +173,6 @@ impl Database {
         transaction.execute(&format!("DELETE FROM {MIGRATIONS_TABLE} WHERE name = $1"), &[&stem]).await?;
         transaction.commit().await?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Database;
-
-    #[tokio::test]
-    async fn query_plans_ignore_formatting_but_detect_changed_predicates() {
-        let Ok(url) = std::env::var("ORM_TEST_DATABASE_URL") else {
-            eprintln!("skipping: set ORM_TEST_DATABASE_URL to run the query plan test");
-            return;
-        };
-        let database = Database::connect(&url).await.expect("connect");
-
-        assert!(database
-            .queries_have_same_plan(
-                "SELECT oid FROM pg_catalog.pg_class WHERE relkind = 'r'",
-                " SELECT pg_class.oid FROM pg_catalog.pg_class WHERE (relkind = 'r');",
-            )
-            .await
-            .expect("compare equivalent plans"));
-        assert!(!database
-            .queries_have_same_plan(
-                "SELECT oid FROM pg_catalog.pg_class WHERE relkind = 'r'",
-                "SELECT oid FROM pg_catalog.pg_class WHERE relkind = 'v'",
-            )
-            .await
-            .expect("compare changed plans"));
     }
 }
 
