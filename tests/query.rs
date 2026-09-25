@@ -44,12 +44,16 @@ fn or_group_is_parenthesized() {
 
 #[test]
 fn null_check_consumes_no_param() {
-    let (sql, next) = QueryOptions::new()
+    let options = QueryOptions::new()
         .filter("deleted_at", FilterOp::IsNull, "")
-        .build_where_clause(1);
+        .filter_group(FilterGroup::or()
+            .filter("retired_at", FilterOp::IsNotNull, true)
+            .filter("archived_at", FilterOp::IsNull, None::<String>));
+    let (sql, next) = options.build_where_clause(1);
 
-    assert_eq!(sql, " WHERE deleted_at IS NULL");
+    assert_eq!(sql, " WHERE deleted_at IS NULL AND (retired_at IS NOT NULL OR archived_at IS NULL)");
     assert_eq!(next, 1);
+    assert!(options.filter_params().is_empty());
 }
 
 #[test]

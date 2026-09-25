@@ -139,7 +139,9 @@ impl FilterGroup {
     }
 
     pub fn filter<T: FilterValue>(mut self, field: impl Into<String>, op: FilterOp, value: T) -> Self {
-        if let Some(converted) = value.into_filter_value(op) {
+        if !op.needs_value() {
+            self.filters.push(Filter { field: field.into(), op, value: None });
+        } else if let Some(converted) = value.into_filter_value(op) {
             self.filters.push(Filter { field: field.into(), op, value: Some(converted) });
         }
         self
@@ -302,7 +304,12 @@ impl QueryOptions {
     }
 
     pub fn filter<T: FilterValue>(mut self, field: impl Into<String>, op: FilterOp, value: T) -> Self {
-        if let Some(converted) = value.into_filter_value(op) {
+        if !op.needs_value() {
+            self.groups.push(FilterGroup {
+                filters: vec![Filter { field: field.into(), op, value: None }],
+                op: LogicalOp::And,
+            });
+        } else if let Some(converted) = value.into_filter_value(op) {
             self.groups.push(FilterGroup {
                 filters: vec![Filter { field: field.into(), op, value: Some(converted) }],
                 op: LogicalOp::And,
