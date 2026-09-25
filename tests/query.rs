@@ -131,6 +131,17 @@ fn numeric_values_are_supported() {
 }
 
 #[test]
+fn case_insensitive_equality_does_not_add_wildcards() {
+    let options = QueryOptions::new()
+        .filter("reference", FilterOp::EqInsensitive, "Order_100%");
+    let (sql, next) = options.build_where_clause(1);
+
+    assert_eq!(sql, " WHERE LOWER(reference) = LOWER($1)");
+    assert_eq!(next, 2);
+    assert_eq!(options.filter_params().len(), 1);
+}
+
+#[test]
 fn from_params_defaults_and_caps_pagination() {
     use orm::query::{Pagination, Search, Sort};
 

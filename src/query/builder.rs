@@ -175,6 +175,7 @@ pub struct Filter {
 #[derive(Debug, Clone, Copy)]
 pub enum FilterOp {
     Eq,
+    EqInsensitive,
     Ne,
     Gt,
     Gte,
@@ -192,6 +193,7 @@ impl FilterOp {
     pub fn as_sql(&self) -> &'static str {
         match self {
             FilterOp::Eq => "=",
+            FilterOp::EqInsensitive => "=",
             FilterOp::Ne => "!=",
             FilterOp::Gt => ">",
             FilterOp::Gte => ">=",
@@ -209,6 +211,7 @@ impl FilterOp {
     pub fn wrap_value(&self, value: &str) -> String {
         match self {
             FilterOp::Like | FilterOp::ILike => format!("%{}%", value),
+            FilterOp::EqInsensitive => value.to_string(),
             _ => value.to_string(),
         }
     }
@@ -323,7 +326,9 @@ impl QueryOptions {
                 .iter()
                 .map(|f| {
                     if f.op.needs_value() {
-                        let s = if matches!(f.op, FilterOp::In | FilterOp::NotIn) {
+                        let s = if matches!(f.op, FilterOp::EqInsensitive) {
+                            format!("LOWER({}) = LOWER(${})", f.field, param_idx)
+                        } else if matches!(f.op, FilterOp::In | FilterOp::NotIn) {
                             format!("{} {}(${})", f.field, f.op.as_sql(), param_idx)
                         } else {
                             format!("{} {} ${}", f.field, f.op.as_sql(), param_idx)
