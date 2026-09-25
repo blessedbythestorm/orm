@@ -464,6 +464,8 @@ The stored definitions are compared with the live catalog definitions. This
 accepts PostgreSQL's formatting of equivalent declarations while preserving
 view output names and check-constraint null behavior. If a declaration cannot
 be normalized, verification fails instead of reporting that the schema matches.
+This check needs permission to create temporary objects and a writable
+transaction; it does not persist schema changes.
 
 ## Lower-level schema APIs
 
