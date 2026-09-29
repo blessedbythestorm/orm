@@ -43,20 +43,24 @@ impl Table {
     }
 
     pub fn column(&self, name: &str) -> Option<&Column> {
-        self.columns.iter().find(|column| column.name == name)
+        self.columns.iter()
+            .find(|column| column.name == name)
     }
 
     pub fn constraint(&self, name: &str) -> Option<&Constraint> {
-        self.constraints.iter().find(|constraint| constraint.name == name)
+        self.constraints.iter()
+            .find(|constraint| constraint.name == name)
     }
 
     pub fn index(&self, name: &str) -> Option<&Index> {
-        self.indexes.iter().find(|index| index.name == name)
+        self.indexes.iter()
+            .find(|index| index.name == name)
     }
 }
 
 /// A named table-level constraint. The name is the diff key, so it must be
-/// stable: the macros derive it from the table and columns when not given one.
+/// stable. Unnamed general CHECKs use a fixed digest of their canonical SQL;
+/// field, presence and unique constraints retain their readable defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Constraint {
     pub name: String,

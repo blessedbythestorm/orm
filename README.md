@@ -151,7 +151,7 @@ use uuid::Uuid;
     export_to = "types/database/accounts.ts"
 )]
 pub struct Account {
-    #[pg(primary, default(sql("gen_random_uuid()")))]
+    #[pg(primary, default_value(gen_random_uuid()))]
     #[crud(insert(skip))]
     pub id: Uuid,
     #[pg(unique)]
@@ -165,11 +165,11 @@ pub struct Account {
 - `orm::FromRow`, Serde, and `orm::Validate` implementations;
 - TypeScript export metadata and migration schema metadata;
 - `get_accounts`, `get_account`, `create_account`, `update_account`, and
-  `delete_account` on `deadpool_postgres::Pool`;
+  `delete_account` on pools, pooled clients, PostgreSQL clients, and transactions;
 - a typed upsert for every declared unique key, such as
   `upsert_account_by_email(&AccountInsert)` for `#[pg(unique)]` and
   `upsert_membership_by_account_id_and_user_id(...)` for a composite
-  `#[table(unique(account_id, user_id))]` constraint.
+  `#[pg(unique(columns(account_id, user_id)))]` constraint.
 
 Generated upserts use PostgreSQL `ON CONFLICT`, update all mutable columns from
 the proposed row, and return the inserted or updated record. The same CRUD
@@ -181,7 +181,7 @@ changes only its populated fields, for example
 
 Generated CRUD respects the column marked `#[pg(primary)]`, but its
 single-record method signatures currently require a UUID key. For another key
-type, use `FromRow`/`QueryExt` or write a repository manually.
+type, use the fluent query API with `.where_("key_column", FilterOp::Eq, key)`.
 The database must provide defaults for generated columns such as the primary
 key and `created_at`.
 
@@ -189,12 +189,39 @@ Useful field attributes are:
 
 ```rust
 #[pg(unique)]
-#[pg(default("active"))]                         // literal default
-#[pg(default(sql("now()")))]                     // raw SQL default
+#[pg(default_value("active"))]                   // literal default
+#[pg(default_value(now()))]                       // database generator
+#[pg(index)]                                      // single-column index
 #[pg(foreign(public.users.id, on_delete(cascade)))]
 #[crud(insert(optional))]
 #[crud(insert(skip), update(skip))]
 ```
+
+Put compound indexes, compound unique constraints, and cross-column database
+rules on the struct. Predicates use a bounded expression syntax, so malformed
+columns and unsupported SQL fail at compile time:
+
+```rust
+#[pg(unique(columns(account_id, user_id)))]
+#[pg(index(columns(account_id, created_at)))]
+#[pg(index(columns(account_id, user_id), unique, where(is_null(revoked_at))))]
+#[pg(validate(present_iff(revoked_at, status == MembershipStatus::Revoked)))]
+pub struct Membership {
+    // ...
+}
+```
+
+Index names are optional. The default uses the table and key columns. When
+multiple inferred indexes would receive the same name, the colliding names add
+a fixed digest of their canonical predicate and uniqueness. This keeps partial
+indexes on the same columns distinct, preserves existing non-colliding names,
+and respects PostgreSQL's 63-byte identifier limit. Use `name = "..."` only
+when an external contract requires a specific database identifier.
+
+`default_value` accepts scalar literals, `now()`, `gen_random_uuid()`, and a
+registered enum variant. Strings are always quoted values; a string such as
+`"now()"` never becomes executable SQL. `pg(validate(...))` creates a database
+CHECK constraint, while `api(validate(...))` validates application inputs.
 
 `Option<T>` maps to a nullable column. Built-in `SqlType` mappings include
 `bool`, integer/float types, `String`, `Vec<u8>`, `uuid::Uuid`, common `chrono`
@@ -271,8 +298,9 @@ pub struct AccountCard {
 `schema`, `name`, and `export_to` are required. The first source column supplies
 the base table. Sources from other tables are joined through foreign keys
 declared with `#[pg(foreign(...))]`. The macro generates `FromRow`, a
-TypeScript type, and `AccountCardView::get_account_cards(QueryOptions)` for
-`deadpool_postgres::Pool`. `filter` and `order_by` are raw SQL.
+TypeScript type, and `AccountCardView::get_account_cards(QueryOptions)` on the
+same clients as table CRUD. `filter` and `order_by` are raw schema SQL. Runtime
+joins can instead be built on SELECT without declaring a database view.
 
 ### `#[api_type]`: validated API types
 
@@ -322,6 +350,202 @@ recognized automatically, as are `Json<T>` responses nested in `Result`.
 
 ## Queries and typed rows
 
+### Fluent queries
+
+Import `orm::query::QueryBuilderExt` to build queries on a pool, pooled client,
+PostgreSQL client, or transaction. `#[table_type]` generates `QueryModel` and
+`TableModel` metadata; `#[view_type]` generates read-only `QueryModel` metadata.
+The shared runtime builders use `QueryOptions`, `FilterGroup`, `InsertValues`,
+and `UpdateValues`. All generated CRUD, view reads, counts, and upserts delegate
+to these builders. The macros only provide model metadata and map typed DTOs
+to values; they no longer maintain a separate SQL execution implementation.
+
+```rust
+use orm::query::{FilterOp, QueryBuilderExt, SortOrder};
+
+let accounts = transaction
+    .update::<Account>()
+    .set("email", new_email)
+    .where_("id", FilterOp::Eq, account_id)
+    .returning()
+    .await?;
+
+let matching = transaction
+    .select::<Account>()
+    .where_("email", FilterOp::ILike, "example.com")
+    .order_by("email", SortOrder::Asc)
+    .limit(25)
+    .fetch_all()
+    .await?;
+
+let deleted = transaction
+    .delete::<Account>()
+    .where_("id", FilterOp::Eq, account_id)
+    .execute()
+    .await?;
+```
+
+Builders do no database work until a terminal method is awaited. Rust reserves
+`where`, so the predicate method is `where_`.
+
+| Operation | Terminal | Result |
+| --- | --- | --- |
+| SELECT | `fetch_all()` | `Vec<Model>` |
+| SELECT | `fetch_optional()` | `Option<Model>`; error on more than one selected row |
+| SELECT | `fetch_one()` | `Model`; error unless exactly one row is selected |
+| SELECT | `count()` | `i64` matching rows before pagination, without sorting or locks |
+| UPDATE / DELETE | `execute()` | `u64` affected rows, without a RETURNING clause |
+| UPDATE / DELETE | `returning()` | `Vec<Model>` from the same modifying statement |
+| INSERT | `execute()` / `returning()` | Affected count / returned rows, including zero for DO NOTHING |
+| INSERT / UPDATE | `returning_one()` | Exactly one returned row, otherwise an error |
+
+`fetch_one` and `fetch_optional` do not silently add a limit. To request the
+first match, explicitly combine an ordering with `limit(1)`. A write returning
+no rows is successful; the application decides whether that means not found,
+a stale version, or an ordinary no-op.
+
+`returning_one()` does not undo a write if it affects multiple rows. Use a
+unique predicate for single-row updates, as generated primary-key CRUD does,
+and keep operations in an explicit transaction when rollback is required.
+
+SELECT, UPDATE, and DELETE support `where_`, `where_group(FilterGroup)`,
+`where_null`, and `where_not_null`. Separate predicates/groups are ANDed; `FilterGroup::or()`
+provides a parenthesized OR. `where_` preserves optional-filter behavior:
+`None` omits a predicate, so use `where_null` to match SQL NULL. Required scope,
+identity, and version values should be concrete values, not optional filters.
+
+SELECT also supports `order_by`, `then_order_by`, `limit`, `offset`, `for_update`,
+and `for_share`. Views support SELECT only. SELECT locks the base relation
+(`FOR UPDATE/SHARE OF <base alias>`), including when LEFT JOINs are present.
+Row locks need an explicit transaction to outlive the statement; a pool query
+releases them immediately.
+
+UPDATE supports `set`, `add`, `subtract`, `set_null`, and `database_now`.
+Arithmetic and timestamp expressions execute inside the UPDATE, preserving
+atomic conditional updates. Exact PostgreSQL numeric values use `NumericText`.
+`set("note", None::<String>)` explicitly writes NULL; omitting a `set` leaves
+the column unchanged. An update must have at least one assignment.
+
+For existing query composition, `.options(QueryOptions)` replaces accumulated
+options, and `.values(UpdateValues)` on UPDATE replaces accumulated assignments.
+Subsequent builder calls extend those supplied values. Writes reject sorting,
+pagination, and row locks passed through `options` before any SQL is executed.
+
+UPDATE and DELETE require a nonempty effective predicate. An omitted optional
+filter or empty group does not satisfy this requirement. To deliberately affect
+the whole table, use `.all_rows()`; combining that with a predicate is rejected.
+
+```rust
+let deleted = transaction
+    .delete::<Account>()
+    .all_rows()
+    .execute()
+    .await?;
+```
+
+Fluent queries validate filter, sort, and write column names against model
+metadata before acquiring a connection or executing SQL. Values are bound
+parameters. Column/value compatibility is still checked at runtime; string
+column names do not provide compile-time field typing or application-level
+authorization. PostgreSQL errors remain in the `anyhow` source chain.
+
+### Joins and projections
+
+SELECT supports `.inner_join::<Model>(alias, on)` and
+`.left_join::<Model>(alias, on)` with explicit `JoinOn` conditions. The joined
+model can be a table or a view. Aliases support self-joins, multiple references
+to the same table, and joins through previously joined relations; no foreign
+key inference is required.
+
+For example, assuming `Order` and `Customer` are declared table models:
+
+```rust
+use orm::query::{FilterOp, JoinOn, QueryBuilderExt};
+
+#[derive(orm::FromRow)]
+struct OrderCustomer {
+    order_id: uuid::Uuid,
+    customer_name: Option<String>,
+}
+
+let rows = transaction
+    .select::<Order>()
+    .alias("orders")
+    .left_join::<Customer>(
+        "customer",
+        JoinOn::eq("orders.customer_id", "customer.id")
+    )
+    .where_("orders.id", FilterOp::Eq, order_id)
+    .project::<OrderCustomer>(&[
+        ("orders.id", "order_id"),
+        ("customer.name", "customer_name"),
+    ])
+    .fetch_all()
+    .await?;
+```
+
+`#[derive(orm::FromRow)]` decodes named struct fields from matching result
+aliases. A projection is a query result, not a registered table or view, and
+does not generate a migration. Use `Option<T>` for columns that can be NULL
+after an unmatched LEFT JOIN. Without `project`, SELECT returns just the base
+model's columns, with output aliases that prevent overlapping `id` fields from
+being confused.
+
+The base alias defaults to the final component of its declared relation name.
+Unqualified fields always refer to the base model. Use `alias.column` for
+joined fields in ON, WHERE, projections, and ordering. Aliases and columns are
+validated before execution; aliases must be unique plain identifiers of at
+most 63 bytes. An ON condition can refer only to the base, earlier joins, and
+the relation being joined. Unknown/future aliases and duplicate output aliases
+are errors.
+
+`JoinOn::eq(left, right)` compares two columns. `.and_on(left, op, right)` adds
+another comparison (`Eq`, `Ne`, `Gt`, `Gte`, `Lt`, or `Lte`). ON also supports
+bound `.where_(field, op, value)`, `.where_group(FilterGroup)`, `.where_null`,
+and `.where_not_null`. All components are ANDed; filter groups provide grouped
+ORs. Empty ON conditions are rejected. Values stay bound across every join and
+the outer WHERE clause.
+
+Put a joined-row eligibility filter in ON when unmatched LEFT JOIN base rows
+should remain. Putting it in WHERE can exclude those rows. One-to-many joins
+return duplicate base rows as SQL does; limits apply to joined rows and
+`count()` counts their multiplicity. RIGHT/FULL/CROSS joins, arbitrary SQL
+expressions, aggregate projections, and joined UPDATE/DELETE are not exposed.
+
+### Inserts, upserts, and generated CRUD
+
+`insert::<Model>().value(field, value)` or `.values(InsertValues)` creates one
+row; no values means `DEFAULT VALUES`. Choose `.execute()`, `.returning()`, or
+`.returning_one()` explicitly. For conflicts:
+
+```rust
+let account = transaction
+    .insert::<Account>()
+    .value("email", email)
+    .on_conflict(&["email"])
+    .do_update_excluded(&["email"])
+    .returning_one()
+    .await?;
+```
+
+An explicit conflict target is followed by `do_nothing()`,
+`do_update_excluded(&[columns])`, or `do_update(UpdateValues)`. Bound update
+values follow the insert parameters; arithmetic updates refer to the existing
+target row. Conflict targets must correspond to database uniqueness rules.
+The runtime validates column membership and rejects empty or duplicate column
+lists and empty explicit update sets.
+
+Generated CRUD preserves its DTO rules: optional insert fields can defer to
+database defaults; skipped fields are excluded; nullable patches distinguish
+omission from explicit NULL; primary-key methods use the declared key name.
+An empty generated update still errors. A missing single-record delete still
+errors. Standard upserts update the same eligible columns from EXCLUDED;
+selective upserts retain unchanged fields and return the existing row even
+when the patch is empty. Counts retain filter-only semantics. These methods
+are convenience adapters over the query API, so existing call sites can stay.
+
+### Existing query interfaces
+
 Tables and views implement `FromRow`. `QueryExt` adds typed query methods to
 both `tokio_postgres::Client` and `deadpool_postgres::Client`:
 
@@ -350,7 +574,7 @@ let options = QueryOptions::new()
     .filter_group(
         FilterGroup::or()
             .filter("email", FilterOp::ILike, "example")
-            .filter("status", FilterOp::Eq, AccountStatus::Suspended),
+            .filter("email", FilterOp::EqInsensitive, "support@company.org"),
     )
     .sort(QuerySort::new("email", SortOrder::Asc))
     .limit(25)

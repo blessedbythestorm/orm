@@ -8,16 +8,16 @@ use orm::validate::Validate;
 use uuid::Uuid;
 
 #[table_type(schema = "public", name = "gadgets", export_to = "types/gadgets.ts")]
-#[table(unique(name, contact))]
+#[pg(unique(columns(name, contact)))]
 pub struct Gadget {
-    #[pg(primary, default(sql("gen_random_uuid()")))]
+    #[pg(primary, default_value(gen_random_uuid()))]
     pub id: Uuid,
     #[pg(unique)]
     #[api(validate(length(min(3), max(30))))]
     pub name: String,
     #[api(validate(email))]
     pub contact: Option<String>,
-    #[pg(default(sql("now()")))]
+    #[pg(default_value(now()))]
     #[crud(insert(optional), update(skip))]
     pub created_at: DateTime<Utc>,
 }
@@ -37,10 +37,22 @@ fn generated_upserts_compile<T: GadgetCrud>(client: &T, data: &GadgetInsert) {
 
 #[test]
 fn insert_enforces_the_table_rules() {
-    let bad = GadgetInsert { id: None, name: "ab".into(), contact: None, created_at: None };
+    let bad = GadgetInsert {
+        id: None,
+        name: "ab".into(),
+        contact: None,
+        created_at: None,
+    };
+
     assert!(bad.validate().is_err());
 
-    let good = GadgetInsert { id: None, name: "abc".into(), contact: None, created_at: None };
+    let good = GadgetInsert {
+        id: None,
+        name: "abc".into(),
+        contact: None,
+        created_at: None,
+    };
+
     assert!(good.validate().is_ok());
 }
 
@@ -52,6 +64,7 @@ fn insert_checks_optional_fields_only_when_present() {
         contact: Some("not-an-email".into()),
         created_at: None,
     };
+
     assert!(bad.validate().is_err());
 }
 
@@ -67,16 +80,22 @@ fn update_checks_only_provided_fields() {
         name: None,
         contact: Some(Some("not-an-email".into())),
     };
+
     assert!(bad_contact.validate().is_err());
 
-    let omitted: GadgetUpdate = serde_json::from_str("{}").expect("omitted patch");
+    let omitted: GadgetUpdate = serde_json::from_str("{}")
+        .expect("omitted patch");
+
     assert_eq!(omitted.contact, None);
 
-    let cleared: GadgetUpdate = serde_json::from_str(r#"{"contact":null}"#).expect("clear patch");
+    let cleared: GadgetUpdate = serde_json::from_str(r#"{"contact":null}"#)
+        .expect("clear patch");
+
     assert_eq!(cleared.contact, Some(None));
 
     let replaced: GadgetUpdate = serde_json::from_str(r#"{"contact":"ana@example.com"}"#)
         .expect("replacement patch");
+
     assert_eq!(replaced.contact, Some(Some("ana@example.com".into())));
 }
 

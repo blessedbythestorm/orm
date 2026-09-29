@@ -1,8 +1,15 @@
 mod builder;
+mod client;
+mod fluent;
+mod insert;
+mod join;
 mod locks;
 mod write;
 
 pub use builder::*;
+pub use fluent::*;
+pub use insert::*;
+pub use join::JoinOn;
 pub use locks::*;
 pub use write::*;
 
@@ -50,7 +57,10 @@ impl Search {
             .map(|fields| {
                 fields
                     .split(',')
-                    .map(|field| field.trim().to_string())
+                    .map(
+                        |field| field.trim()
+                            .to_string()
+                    )
                     .filter(|field| !field.is_empty())
                     .collect()
             })

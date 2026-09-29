@@ -16,13 +16,22 @@ fn col(name: &str, sql_type: &str) -> Column {
 }
 
 fn table(name: &str, columns: Vec<Column>) -> Table {
-    Table { schema: "public".into(), name: name.into(), columns, ..Default::default() }
+    Table {
+        schema: "public".into(),
+        name: name.into(),
+        columns,
+        ..Default::default()
+    }
 }
 
 fn unique(name: &str, columns: &[&str]) -> Constraint {
     Constraint {
         name: name.into(),
-        kind: ConstraintKind::Unique { columns: columns.iter().map(|c| c.to_string()).collect() },
+        kind: ConstraintKind::Unique {
+            columns: columns.iter()
+                .map(|c| c.to_string())
+                .collect(),
+        },
     }
 }
 
@@ -31,7 +40,10 @@ fn check(name: &str, expression: &str) -> Constraint {
 }
 
 fn schema(tables: Vec<Table>) -> DatabaseSchema {
-    let tables = tables.into_iter().map(|t| (t.qualified_name(), t)).collect();
+    let tables = tables.into_iter()
+        .map(|t| (t.qualified_name(), t))
+        .collect();
+
     DatabaseSchema { tables, ..Default::default() }
 }
 
@@ -48,9 +60,10 @@ fn no_changes_when_schemas_match() {
 #[test]
 fn create_table_renders_columns_and_primary_key() {
     let desired = schema(vec![table(
-        "widgets",
-        vec![Column { primary_key: true, ..col("id", "uuid") }, col("name", "text")],
-    )]);
+            "widgets",
+            vec![Column { primary_key: true, ..col("id", "uuid") }, col("name", "text")],
+        )]);
+
     let sql = up(&DatabaseSchema::default(), &desired);
 
     assert!(sql.contains("CREATE TABLE public.widgets ("), "{sql}");
@@ -71,6 +84,7 @@ fn create_table_renders_a_foreign_key() {
         }),
         ..col("user_id", "uuid")
     };
+
     let sql = up(&DatabaseSchema::default(), &schema(vec![table("sessions", vec![user_id])]));
 
     assert!(
@@ -128,7 +142,12 @@ fn invert_turns_add_column_into_drop_column() {
 }
 
 fn status_enum(values: &[&str]) -> EnumType {
-    EnumType { name: "public.status".into(), values: values.iter().map(|v| v.to_string()).collect() }
+    EnumType {
+        name: "public.status".into(),
+        values: values.iter()
+            .map(|v| v.to_string())
+            .collect(),
+    }
 }
 
 fn schema_with_enum(values: &[&str], tables: Vec<Table>) -> DatabaseSchema {
@@ -154,6 +173,7 @@ fn extending_an_enum_recreates_the_type() {
         sql.contains("ALTER TABLE public.widgets ALTER COLUMN status TYPE public.status USING status::text::public.status;"),
         "{sql}"
     );
+
     assert!(sql.contains("DROP TYPE public.status_old;"), "{sql}");
 }
 
@@ -169,6 +189,7 @@ fn removing_a_value_falls_back_to_the_column_default() {
         sql.contains("USING (CASE WHEN status::text IN ('live') THEN status::text ELSE 'live' END)::public.status;"),
         "{sql}"
     );
+
     assert!(sql.contains("ALTER TABLE public.widgets ALTER COLUMN status SET DEFAULT 'live';"), "{sql}");
 }
 
@@ -209,11 +230,16 @@ fn a_dropped_table_is_dropped_before_the_enum_replace_and_excluded_from_it() {
         &["live", "ended"],
         vec![table("widgets", vec![status_col()]), table("gadgets", vec![status_col()])],
     );
+
     let desired = schema_with_enum(&["live", "ended", "paused"], vec![table("widgets", vec![status_col()])]);
 
     let sql = up(&baseline, &desired);
-    let drop_position = sql.find("DROP TABLE public.gadgets CASCADE;").expect("gadgets dropped");
-    let replace_position = sql.find("ALTER TYPE public.status RENAME TO").expect("status replaced");
+    let drop_position = sql.find("DROP TABLE public.gadgets CASCADE;")
+        .expect("gadgets dropped");
+
+    let replace_position = sql.find("ALTER TYPE public.status RENAME TO")
+        .expect("status replaced");
+
     assert!(drop_position < replace_position, "{sql}");
     assert!(!sql.contains("ALTER TABLE public.gadgets ALTER COLUMN"), "{sql}");
 }
@@ -225,6 +251,7 @@ fn moving_a_column_off_a_dying_enum_drops_the_type_last() {
         "public.old_status".into(),
         EnumType { name: "public.old_status".into(), values: vec!["live".into()] },
     );
+
     let mut desired = schema(vec![table("widgets", vec![col("status", "public.new_status")])]);
     desired.enums.insert(
         "public.new_status".into(),
@@ -232,13 +259,85 @@ fn moving_a_column_off_a_dying_enum_drops_the_type_last() {
     );
 
     let sql = up(&baseline, &desired);
-    let create_position = sql.find("CREATE TYPE public.new_status").expect("new enum created");
+    let create_position = sql.find("CREATE TYPE public.new_status")
+        .expect("new enum created");
+
     let cast_position = sql
         .find("ALTER COLUMN status TYPE public.new_status USING status::text::public.new_status")
         .expect("column re-pointed with a cast");
-    let drop_position = sql.find("DROP TYPE IF EXISTS public.old_status;").expect("old enum dropped");
+
+    let drop_position = sql.find("DROP TYPE IF EXISTS public.old_status;")
+        .expect("old enum dropped");
+
     assert!(create_position < cast_position, "{sql}");
     assert!(cast_position < drop_position, "{sql}");
+}
+
+#[test]
+fn moving_a_defaulted_text_column_to_an_enum_drops_and_restores_the_default() {
+    let text = Column { default: Some("'live'::text".into()), ..col("status", "text") };
+    let enumeration = Column { default: Some("'live'::public.status".into()), ..status_col() };
+    let baseline = schema(vec![table("widgets", vec![text])]);
+    let desired = schema_with_enum(&["live", "ended"], vec![table("widgets", vec![enumeration])]);
+    let changes = diff(&baseline, &desired, &mut NoRenames);
+
+    let sql = render(&changes);
+    let drop = sql.find("ALTER COLUMN status DROP DEFAULT")
+        .unwrap();
+
+    let cast = sql.find("ALTER COLUMN status TYPE public.status USING status::text::public.status")
+        .unwrap();
+
+    let restore = sql.find("ALTER COLUMN status SET DEFAULT 'live'::public.status")
+        .unwrap();
+
+    assert!(drop < cast && cast < restore, "{sql}");
+
+    let down = render(&invert(&changes, &baseline));
+    let drop = down.find("ALTER COLUMN status DROP DEFAULT")
+        .unwrap();
+
+    let cast = down.find("ALTER COLUMN status TYPE text")
+        .unwrap();
+
+    let restore = down.find("ALTER COLUMN status SET DEFAULT 'live'::text")
+        .unwrap();
+
+    assert!(drop < cast && cast < restore, "{down}");
+}
+
+#[test]
+fn moving_a_checked_text_column_to_an_enum_drops_the_check_before_the_cast() {
+    let mut baseline_table = table("widgets", vec![col("status", "text")]);
+    baseline_table.constraints = vec![check(
+            "widgets_status_check",
+            "status IN ('live', 'ended')",
+        )];
+
+    let baseline = schema(vec![baseline_table]);
+    let desired = schema_with_enum(
+        &["live", "ended"],
+        vec![table("widgets", vec![status_col()])],
+    );
+
+    let sql = up(&baseline, &desired);
+    let drop = sql.find("DROP CONSTRAINT IF EXISTS widgets_status_check")
+        .unwrap();
+
+    let cast = sql.find("ALTER COLUMN status TYPE public.status USING status::text::public.status")
+        .unwrap();
+
+    assert!(drop < cast, "{sql}");
+
+    let changes = diff(&baseline, &desired, &mut NoRenames);
+    let down = render(&invert(&changes, &baseline));
+    let cast = down.find("ALTER COLUMN status TYPE text")
+        .unwrap();
+
+    let restore = down.find("ADD CONSTRAINT widgets_status_check")
+        .unwrap();
+
+    assert!(cast < restore, "{down}");
 }
 
 #[test]
@@ -266,6 +365,7 @@ fn create_table_inlines_table_constraints() {
         sql.contains("CONSTRAINT widgets_supplier_id_code_key UNIQUE (supplier_id, code)"),
         "{sql}"
     );
+
     assert!(sql.contains("CONSTRAINT widgets_positive_check CHECK (weight_kg > 0)"), "{sql}");
 }
 
@@ -289,8 +389,11 @@ fn changing_a_constraint_expression_drops_and_re_adds_it() {
     after.constraints = vec![check("widgets_weight_check", "weight_kg >= 0")];
 
     let sql = up(&schema(vec![before]), &schema(vec![after]));
-    let drop = sql.find("DROP CONSTRAINT IF EXISTS widgets_weight_check").expect("dropped");
-    let add = sql.find("ADD CONSTRAINT widgets_weight_check CHECK (weight_kg >= 0)").expect("re-added");
+    let drop = sql.find("DROP CONSTRAINT IF EXISTS widgets_weight_check")
+        .expect("dropped");
+
+    let add = sql.find("ADD CONSTRAINT widgets_weight_check CHECK (weight_kg >= 0)")
+        .expect("re-added");
 
     assert!(drop < add, "{sql}");
 }
@@ -310,11 +413,11 @@ fn dropping_a_constraint_is_reversible() {
 fn a_partial_unique_index_renders_its_predicate() {
     let mut widgets = table("widgets", vec![col("coil_id", "uuid")]);
     widgets.indexes = vec![Index {
-        name: "widgets_coil_id_partial_idx".into(),
-        columns: vec!["coil_id".into()],
-        unique: true,
-        predicate: Some("voided_at IS NULL".into()),
-    }];
+            name: "widgets_coil_id_partial_idx".into(),
+            columns: vec!["coil_id".into()],
+            unique: true,
+            predicate: Some("voided_at IS NULL".into()),
+        }];
 
     let sql = up(&DatabaseSchema::default(), &schema(vec![widgets]));
 

@@ -1,27 +1,28 @@
 use syn::{Attribute, Item, Lit};
 
 pub struct ApiDef {
-    pub name: syn::Ident,
     pub export_to: String,
 }
 
 impl ApiDef {
     pub fn parse(input: &Item) -> Self {
-        let (name, attrs) = match input {
-            Item::Struct(s) => (s.ident.clone(), &s.attrs),
-            Item::Enum(e) => (e.ident.clone(), &e.attrs),
+        let attrs = match input {
+            Item::Struct(s) => &s.attrs,
+            Item::Enum(e) => &e.attrs,
             _ => panic!("api_type only supports structs and enums"),
         };
 
         let export_to = parse_export_to(attrs);
 
-        Self { name, export_to }
+        Self { export_to }
     }
 }
 
 fn parse_export_to(attrs: &[Attribute]) -> String {
     for attr in attrs {
-        if !attr.path().is_ident("api_type") {
+        if !attr.path()
+            .is_ident("api_type")
+        {
             continue;
         }
 
@@ -29,10 +30,12 @@ fn parse_export_to(attrs: &[Attribute]) -> String {
 
         let _ = attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("export_to")
-                && let Ok(Lit::Str(s)) = meta.value()?.parse::<Lit>()
+                && let Ok(Lit::Str(s)) = meta.value()?
+                    .parse::<Lit>()
             {
                 export_to = Some(s.value());
             }
+
             Ok(())
         });
 

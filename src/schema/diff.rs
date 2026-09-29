@@ -50,7 +50,13 @@ pub enum ColumnOp {
     Add(Column),
     Drop(String),
     Rename { from: String, to: String },
-    SetType { column: String, sql_type: String, using: Option<String> },
+    SetType {
+        column: String,
+        sql_type: String,
+        using: Option<String>,
+        default_before: Option<String>,
+        default_after: Option<String>,
+    },
     SetNullable { column: String, nullable: bool },
     SetDefault { column: String, default: Option<String> },
 }
@@ -58,19 +64,40 @@ pub enum ColumnOp {
 /// Resolves the inherently-ambiguous "is this a rename or a drop + add?"
 /// question. A pure schema diff can't know, so the decision comes from here.
 pub trait RenameResolver {
-    fn confirm_table_rename(&mut self, schema: &str, from: &str, to: &str) -> bool;
-    fn confirm_column_rename(&mut self, table: &TableReference, from: &str, to: &str) -> bool;
+    fn confirm_table_rename(
+        &mut self,
+        schema: &str,
+        from: &str,
+        to: &str,
+    ) -> bool;
+
+    fn confirm_column_rename(
+        &mut self,
+        table: &TableReference,
+        from: &str,
+        to: &str,
+    ) -> bool;
 }
 
 /// Treats every removed/added pair as a drop + add. Used for non-interactive runs.
 pub struct NoRenames;
 
 impl RenameResolver for NoRenames {
-    fn confirm_table_rename(&mut self, _schema: &str, _from: &str, _to: &str) -> bool {
+    fn confirm_table_rename(
+        &mut self,
+        _schema: &str,
+        _from: &str,
+        _to: &str,
+    ) -> bool {
         false
     }
 
-    fn confirm_column_rename(&mut self, _table: &TableReference, _from: &str, _to: &str) -> bool {
+    fn confirm_column_rename(
+        &mut self,
+        _table: &TableReference,
+        _from: &str,
+        _to: &str,
+    ) -> bool {
         false
     }
 }
@@ -81,7 +108,8 @@ pub fn diff(
     desired: &DatabaseSchema,
     resolver: &mut dyn RenameResolver,
 ) -> Vec<SchemaChange> {
-    Differ::new(resolver).run(baseline, desired)
+    Differ::new(resolver)
+        .run(baseline, desired)
 }
 
 /// Accumulates schema changes while walking the two schemas, so the traversal
@@ -112,7 +140,10 @@ impl<'a> Differ<'a> {
     /// columns that use them), then table creates/renames/column changes, then
     /// enum drops (a column must move off a type before it can go), then views.
     fn run(mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema) -> Vec<SchemaChange> {
-        self.desired_enums = desired.enums.keys().cloned().collect();
+        self.desired_enums = desired.enums.keys()
+            .cloned()
+            .collect();
+
         self.diff_schemas(baseline, desired);
 
         let plan = self.plan_tables(baseline, desired);
@@ -131,14 +162,16 @@ impl<'a> Differ<'a> {
 
         for (old_table, new_table) in &plan.renamed {
             self.emit(SchemaChange::RenameTable { table: old_table.reference(), to: new_table.name.clone() });
+            self.drop_changed_schema_objects(old_table, new_table);
             self.diff_columns(old_table, new_table);
-            self.diff_constraints(old_table, new_table);
+            self.add_changed_schema_objects(old_table, new_table);
         }
 
         for desired_table in desired.tables.values() {
             if let Some(baseline_table) = baseline.tables.get(&desired_table.qualified_name()) {
+                self.drop_changed_schema_objects(baseline_table, desired_table);
                 self.diff_columns(baseline_table, desired_table);
-                self.diff_constraints(baseline_table, desired_table);
+                self.add_changed_schema_objects(baseline_table, desired_table);
             }
         }
 
@@ -183,8 +216,15 @@ impl<'a> Differ<'a> {
     /// [`SchemaChange::ReplaceEnum`]: recreate the type and re-point every
     /// surviving column that stores it. Columns of tables dropped by this same
     /// migration are already gone by the time the replace runs.
-    fn diff_enums(&mut self, baseline: &DatabaseSchema, desired: &DatabaseSchema, plan: &TablePlan) {
-        let doomed: BTreeSet<String> = plan.dropped.iter().map(|table| table.qualified_name()).collect();
+    fn diff_enums(
+        &mut self,
+        baseline: &DatabaseSchema,
+        desired: &DatabaseSchema,
+        plan: &TablePlan,
+    ) {
+        let doomed: BTreeSet<String> = plan.dropped.iter()
+            .map(|table| table.qualified_name())
+            .collect();
 
         for (name, desired_enum) in &desired.enums {
             let Some(baseline_enum) = baseline.enums.get(name) else {
@@ -224,6 +264,7 @@ impl<'a> Differ<'a> {
                 None => true,
                 Some(desired_view) => desired_view.definition != baseline_view.definition,
             };
+
             if gone_or_changed {
                 self.emit(SchemaChange::DropView(baseline_view.reference()));
             }
@@ -238,6 +279,7 @@ impl<'a> Differ<'a> {
                 None => true,
                 Some(baseline_view) => baseline_view.definition != desired_view.definition,
             };
+
             if new_or_changed {
                 self.emit(SchemaChange::CreateView(desired_view.clone()));
             }
@@ -272,6 +314,7 @@ impl<'a> Differ<'a> {
                     let old_column = removed.remove(index);
                     let rename =
                         ColumnOp::Rename { from: old_column.name.clone(), to: new_column.name.clone() };
+
                     self.alter_column(&table, rename);
                     self.diff_column_attributes(&table, old_column, new_column);
                 }
@@ -290,9 +333,10 @@ impl<'a> Differ<'a> {
         }
     }
 
-    /// Diffs table-level constraints and indexes by name. Postgres cannot alter
-    /// either in place, so a changed definition becomes a drop and a re-add.
-    fn diff_constraints(&mut self, baseline_table: &Table, desired_table: &Table) {
+    /// Drops changed table constraints and indexes before column changes. Their
+    /// predicates may use operators from the old column type and PostgreSQL
+    /// otherwise tries to reparse them midway through a type conversion.
+    fn drop_changed_schema_objects(&mut self, baseline_table: &Table, desired_table: &Table) {
         let table = desired_table.reference();
 
         for old in &baseline_table.constraints {
@@ -302,16 +346,6 @@ impl<'a> Differ<'a> {
 
             if !survives {
                 self.alter_table(&table, TableOp::DropConstraint(old.name.clone()));
-            }
-        }
-
-        for new in &desired_table.constraints {
-            let unchanged = baseline_table
-                .constraint(&new.name)
-                .is_some_and(|old| old.kind == new.kind);
-
-            if !unchanged {
-                self.alter_table(&table, TableOp::AddConstraint(new.clone()));
             }
         }
 
@@ -325,7 +359,23 @@ impl<'a> Differ<'a> {
                     schema: baseline_table.schema.clone(),
                     name: old.name.clone(),
                 };
+
                 self.alter_table(&table, op);
+            }
+        }
+    }
+
+    /// Recreates changed table constraints and indexes after column changes.
+    fn add_changed_schema_objects(&mut self, baseline_table: &Table, desired_table: &Table) {
+        let table = desired_table.reference();
+
+        for new in &desired_table.constraints {
+            let unchanged = baseline_table
+                .constraint(&new.name)
+                .is_some_and(|old| old.kind == new.kind);
+
+            if !unchanged {
+                self.alter_table(&table, TableOp::AddConstraint(new.clone()));
             }
         }
 
@@ -340,7 +390,12 @@ impl<'a> Differ<'a> {
         }
     }
 
-    fn diff_column_attributes(&mut self, table: &TableReference, old: &Column, new: &Column) {
+    fn diff_column_attributes(
+        &mut self,
+        table: &TableReference,
+        old: &Column,
+        new: &Column,
+    ) {
         let column = new.name.clone();
         if old.unique != new.unique {
             let name = format!("{}_{column}_key", table.name);
@@ -355,32 +410,44 @@ impl<'a> Differ<'a> {
 
             self.alter_table(table, op);
         }
-        if old.sql_type != new.sql_type {
+
+        let type_changed = old.sql_type != new.sql_type;
+        if type_changed {
             let using = self
                 .desired_enums
                 .contains(&new.sql_type)
                 .then(|| format!("{}::text::{}", column, new.sql_type));
+
             self.alter_column(
                 table,
-                ColumnOp::SetType { column: column.clone(), sql_type: new.sql_type.clone(), using },
+                ColumnOp::SetType {
+                    column: column.clone(),
+                    sql_type: new.sql_type.clone(),
+                    using,
+                    default_before: old.default.clone(),
+                    default_after: new.default.clone(),
+                },
             );
         }
+
         if old.nullable != new.nullable {
             self.alter_column(
                 table,
                 ColumnOp::SetNullable { column: column.clone(), nullable: new.nullable },
             );
         }
-        if old.default != new.default {
+
+        if !type_changed && old.default != new.default {
             self.alter_column(table, ColumnOp::SetDefault { column, default: new.default.clone() });
         }
     }
 
     fn find_table_rename(&mut self, new_table: &Table, candidates: &[&Table]) -> Option<usize> {
-        candidates.iter().position(|old| {
-            old.schema == new_table.schema
-                && self.resolver.confirm_table_rename(&new_table.schema, &old.name, &new_table.name)
-        })
+        candidates.iter()
+            .position(|old| {
+                old.schema == new_table.schema
+                    && self.resolver.confirm_table_rename(&new_table.schema, &old.name, &new_table.name)
+            })
     }
 
     fn find_column_rename(
@@ -389,10 +456,11 @@ impl<'a> Differ<'a> {
         candidates: &[&Column],
         table: &TableReference,
     ) -> Option<usize> {
-        candidates.iter().position(|old| {
-            old.sql_type == new_column.sql_type
-                && self.resolver.confirm_column_rename(table, &old.name, &new_column.name)
-        })
+        candidates.iter()
+            .position(|old| {
+                old.sql_type == new_column.sql_type
+                    && self.resolver.confirm_column_rename(table, &old.name, &new_column.name)
+            })
     }
 }
 
@@ -428,19 +496,29 @@ fn enum_dependents(
 
 /// Tables present in `a` but not in `b`, keyed by qualified name.
 fn tables_missing_from<'a>(a: &'a DatabaseSchema, b: &DatabaseSchema) -> Vec<&'a Table> {
-    a.tables.values().filter(|table| !b.tables.contains_key(&table.qualified_name())).collect()
+    a.tables.values()
+        .filter(|table| !b.tables.contains_key(&table.qualified_name()))
+        .collect()
 }
 
 /// Columns present in `a` but not in `b`, keyed by name.
 fn columns_missing_from<'a>(a: &'a Table, b: &Table) -> Vec<&'a Column> {
-    a.columns.iter().filter(|column| b.column(&column.name).is_none()).collect()
+    a.columns.iter()
+        .filter(
+            |column| b.column(&column.name)
+                .is_none()
+        )
+        .collect()
 }
 
 /// Produces the changes that undo `changes`, reading old definitions from the
 /// schema as it was *before* those changes (the migration's baseline). The list
 /// is reversed so dependent objects are torn down before what they depend on.
 pub fn invert(changes: &[SchemaChange], baseline: &DatabaseSchema) -> Vec<SchemaChange> {
-    let mut inverted: Vec<SchemaChange> = changes.iter().map(|change| invert_one(change, baseline)).collect();
+    let mut inverted: Vec<SchemaChange> = changes.iter()
+        .map(|change| invert_one(change, baseline))
+        .collect();
+
     inverted.reverse();
     inverted
 }
@@ -542,24 +620,54 @@ fn invert_column(baseline: &DatabaseSchema, table: &TableReference, op: &ColumnO
             Some(existing) => alter(ColumnOp::Add(existing.clone())),
             None => cannot_revert(table, column, "restore"),
         },
-        ColumnOp::SetType { column, .. } => revert_attribute(baseline, table, column, "type", |existing| {
-            let using = baseline
-                .enums
-                .contains_key(&existing.sql_type)
-                .then(|| format!("{}::text::{}", column, existing.sql_type));
-            ColumnOp::SetType { column: column.clone(), sql_type: existing.sql_type.clone(), using }
-        }),
+        ColumnOp::SetType { column, .. } => revert_attribute(
+            baseline,
+            table,
+            column,
+            "type",
+            |existing| {
+                let using = baseline
+                    .enums
+                    .contains_key(&existing.sql_type)
+                    .then(|| format!("{}::text::{}", column, existing.sql_type));
+
+                let default_before = match op {
+                    ColumnOp::SetType { default_after, .. } => default_after.clone(),
+                    _ => unreachable!(),
+                };
+
+                ColumnOp::SetType {
+                    column: column.clone(),
+                    sql_type: existing.sql_type.clone(),
+                    using,
+                    default_before,
+                    default_after: existing.default.clone(),
+                }
+            }
+        ),
         ColumnOp::SetNullable { column, .. } => {
-            revert_attribute(baseline, table, column, "nullability", |existing| ColumnOp::SetNullable {
-                column: column.clone(),
-                nullable: existing.nullable,
-            })
+            revert_attribute(
+                baseline,
+                table,
+                column,
+                "nullability",
+                |existing| ColumnOp::SetNullable {
+                    column: column.clone(),
+                    nullable: existing.nullable,
+                }
+            )
         }
         ColumnOp::SetDefault { column, .. } => {
-            revert_attribute(baseline, table, column, "default", |existing| ColumnOp::SetDefault {
-                column: column.clone(),
-                default: existing.default.clone(),
-            })
+            revert_attribute(
+                baseline,
+                table,
+                column,
+                "default",
+                |existing| ColumnOp::SetDefault {
+                    column: column.clone(),
+                    default: existing.default.clone(),
+                }
+            )
         }
     }
 }
@@ -588,7 +696,8 @@ fn baseline_column<'a>(
     table: &TableReference,
     column: &str,
 ) -> Option<&'a Column> {
-    baseline.tables.get(&table.qualified_name())?.column(column)
+    baseline.tables.get(&table.qualified_name())?
+        .column(column)
 }
 
 fn schemas_of(database: &DatabaseSchema) -> BTreeSet<String> {
@@ -596,14 +705,17 @@ fn schemas_of(database: &DatabaseSchema) -> BTreeSet<String> {
     for table in database.tables.values() {
         schemas.insert(table.schema.clone());
     }
+
     for view in database.views.values() {
         schemas.insert(view.schema.clone());
     }
+
     for enum_type in database.enums.values() {
         if let Some((schema, _)) = enum_type.name.split_once('.') {
             schemas.insert(schema.to_string());
         }
     }
+
     schemas
 }
 
@@ -612,7 +724,9 @@ fn schemas_of(database: &DatabaseSchema) -> BTreeSet<String> {
 /// already-existing tables impose no ordering; cyclic groups keep their original
 /// order (inline foreign keys can't express a cycle anyway).
 fn order_by_dependencies(tables: Vec<&Table>) -> Vec<&Table> {
-    let creating: BTreeSet<String> = tables.iter().map(|table| table.qualified_name()).collect();
+    let creating: BTreeSet<String> = tables.iter()
+        .map(|table| table.qualified_name())
+        .collect();
 
     let mut ordered = Vec::new();
     let mut placed = BTreeSet::new();
@@ -635,6 +749,7 @@ fn order_by_dependencies(tables: Vec<&Table>) -> Vec<&Table> {
             ordered.extend(deferred);
             break;
         }
+
         remaining = deferred;
     }
 
@@ -642,13 +757,14 @@ fn order_by_dependencies(tables: Vec<&Table>) -> Vec<&Table> {
 }
 
 fn dependencies_satisfied(table: &Table, creating: &BTreeSet<String>, placed: &BTreeSet<String>) -> bool {
-    table.columns.iter().all(|column| match &column.foreign_key {
-        Some(foreign_key) => {
-            let referenced = format!("{}.{}", foreign_key.schema, foreign_key.table);
-            referenced == table.qualified_name()
-                || !creating.contains(&referenced)
-                || placed.contains(&referenced)
-        }
-        None => true,
-    })
+    table.columns.iter()
+        .all(|column| match &column.foreign_key {
+            Some(foreign_key) => {
+                let referenced = format!("{}.{}", foreign_key.schema, foreign_key.table);
+                referenced == table.qualified_name()
+                    || !creating.contains(&referenced)
+                    || placed.contains(&referenced)
+            }
+            None => true,
+        })
 }

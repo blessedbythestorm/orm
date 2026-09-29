@@ -9,11 +9,17 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
     let name = &table.name;
     let export_path = table.export_path();
 
-    let struct_helpers = ["table_type", "table"];
+    let struct_helpers = ["table_type", "pg"];
     let user_attrs: Vec<_> = input
         .attrs
         .iter()
-        .filter(|a| !struct_helpers.iter().any(|helper| a.path().is_ident(helper)))
+        .filter(
+            |a| !struct_helpers.iter()
+                .any(
+                    |helper| a.path()
+                        .is_ident(helper)
+                )
+        )
         .collect();
 
     let helper_attrs = ["pg", "crud", "api"];
@@ -22,7 +28,14 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
         .iter()
         .map(|f| {
             let mut field = f.clone();
-            field.attrs.retain(|a| !helper_attrs.iter().any(|helper| a.path().is_ident(helper)));
+            field.attrs.retain(
+                |a| !helper_attrs.iter()
+                    .any(
+                        |helper| a.path()
+                            .is_ident(helper)
+                    )
+            );
+
             field
         })
         .collect();
@@ -35,7 +48,13 @@ pub fn generate(table: &TableDef, input: &ItemStruct) -> TokenStream {
         .iter()
         .map(|f| crate::export::Field { name: f.name_str.clone(), ty: f.ty.clone(), forced_optional: false })
         .collect();
-    let ts_export = crate::export::struct_export(&name.to_string(), export_path, &doc, &ts_fields);
+
+    let ts_export = crate::export::struct_export(
+        &name.to_string(),
+        export_path,
+        &doc,
+        &ts_fields
+    );
 
     quote! {
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -29,17 +29,23 @@ impl InsertValues {
             field: field.into(),
             value: Arc::new(value),
         });
+
         self
     }
 
     pub fn build(&self, allowed: &[&str]) -> Result<(String, String)> {
-        validate_fields(self.values.iter().map(|value| value.field.as_str()), allowed)?;
+        validate_fields(
+            self.values.iter()
+                .map(|value| value.field.as_str()),
+            allowed
+        )?;
 
         let columns = self.values
             .iter()
             .map(|value| value.field.as_str())
             .collect::<Vec<_>>()
             .join(", ");
+
         let placeholders = (1..=self.values.len())
             .map(|index| format!("${index}"))
             .collect::<Vec<_>>()
@@ -85,6 +91,10 @@ impl UpdateValues {
         Self::default()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
     pub fn assign<T>(mut self, field: impl Into<String>, value: T) -> Self
     where
         T: ToSql + Send + Sync + 'static,
@@ -93,6 +103,7 @@ impl UpdateValues {
             field: field.into(),
             operation: UpdateOperation::Assign(Arc::new(value)),
         });
+
         self
     }
 
@@ -104,6 +115,7 @@ impl UpdateValues {
             field: field.into(),
             operation: UpdateOperation::Add(Arc::new(value)),
         });
+
         self
     }
 
@@ -115,6 +127,7 @@ impl UpdateValues {
             field: field.into(),
             operation: UpdateOperation::Subtract(Arc::new(value)),
         });
+
         self
     }
 
@@ -123,6 +136,7 @@ impl UpdateValues {
             field: field.into(),
             operation: UpdateOperation::Null,
         });
+
         self
     }
 
@@ -131,20 +145,35 @@ impl UpdateValues {
             field: field.into(),
             operation: UpdateOperation::DatabaseNow,
         });
+
         self
     }
 
     pub fn build(&self, param_offset: usize, allowed: &[&str]) -> Result<(String, usize)> {
+        self.build_qualified(param_offset, allowed, None)
+    }
+
+    pub(crate) fn build_qualified(
+        &self,
+        param_offset: usize,
+        allowed: &[&str],
+        qualifier: Option<&str>,
+    ) -> Result<(String, usize)> {
         if self.values.is_empty() {
             bail!("filtered update requires at least one value");
         }
 
-        validate_fields(self.values.iter().map(|value| value.field.as_str()), allowed)?;
+        validate_fields(
+            self.values.iter()
+                .map(|value| value.field.as_str()),
+            allowed
+        )?;
 
         let mut param_index = param_offset;
         let mut assignments = Vec::with_capacity(self.values.len());
 
         for value in &self.values {
+            let source = qualifier.map_or_else(|| value.field.clone(), |alias| format!("{alias}.{}", value.field));
             let assignment = match value.operation {
                 UpdateOperation::Assign(_) => {
                     let assignment = format!("{} = ${param_index}", value.field);
@@ -152,12 +181,12 @@ impl UpdateValues {
                     assignment
                 }
                 UpdateOperation::Add(_) => {
-                    let assignment = format!("{} = {} + ${param_index}", value.field, value.field);
+                    let assignment = format!("{} = {} + ${param_index}", value.field, source);
                     param_index += 1;
                     assignment
                 }
                 UpdateOperation::Subtract(_) => {
-                    let assignment = format!("{} = {} - ${param_index}", value.field, value.field);
+                    let assignment = format!("{} = {} - ${param_index}", value.field, source);
                     param_index += 1;
                     assignment
                 }

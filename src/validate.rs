@@ -56,7 +56,10 @@ where
     type Rejection = Response;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let inner = E::from_request(req, state).await.map_err(IntoResponse::into_response)?;
+        let inner = E::from_request(req, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+
         validated(inner)
     }
 }
@@ -72,7 +75,10 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let inner = E::from_request_parts(parts, state).await.map_err(IntoResponse::into_response)?;
+        let inner = E::from_request_parts(parts, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+
         validated(inner)
     }
 }
@@ -84,14 +90,14 @@ where
 {
     match inner.validate() {
         Ok(()) => Ok(Valid(inner)),
-        Err(errors) => Err(rejection(&errors)),
+        Err(errors) => Err(validation_rejection(&errors)),
     }
 }
 
 /// `400 { "error": "<summary>", "fields": { "<field>": "<message>" } }` — the
 /// `fields` map lets the client surface each error on its form field (the
 /// generated client parses it into `ApiError.fields`).
-fn rejection(errors: &ValidationErrors) -> Response {
+pub fn validation_rejection(errors: &ValidationErrors) -> Response {
     let mut fields = serde_json::Map::new();
     for (field, field_errors) in errors.field_errors() {
         if let Some(first) = field_errors.first() {
@@ -99,7 +105,11 @@ fn rejection(errors: &ValidationErrors) -> Response {
                 .message
                 .clone()
                 .map(|m| m.into_owned())
-                .unwrap_or_else(|| first.code.clone().into_owned());
+                .unwrap_or_else(
+                    || first.code.clone()
+                        .into_owned()
+                );
+
             fields.insert(field.to_string(), serde_json::Value::String(message));
         }
     }
@@ -114,5 +124,5 @@ fn rejection(errors: &ValidationErrors) -> Response {
         StatusCode::BAD_REQUEST,
         axum::Json(serde_json::json!({ "error": summary, "fields": fields })),
     )
-        .into_response()
+    .into_response()
 }

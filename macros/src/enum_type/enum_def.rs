@@ -8,9 +8,26 @@ pub fn generate(def: &EnumDef, input: &ItemEnum) -> TokenStream {
     let vis = &input.vis;
     let name = &def.name;
 
-    let user_attrs: Vec<_> = input.attrs.iter().filter(|a| !a.path().is_ident("enum_type")).collect();
+    let user_attrs: Vec<_> = input.attrs.iter()
+        .filter(
+            |a| !a.path()
+                .is_ident("enum_type")
+        )
+        .collect();
 
-    let variants = &input.variants;
+    let variants = input
+        .variants
+        .iter()
+        .cloned()
+        .map(|mut variant| {
+            variant.attrs.retain(
+                |attribute| !attribute.path()
+                    .is_ident("postgres")
+            );
+
+            variant
+        })
+        .collect::<Vec<_>>();
 
     let all: Vec<TokenStream> = def
         .variants
@@ -39,7 +56,7 @@ pub fn generate(def: &EnumDef, input: &ItemEnum) -> TokenStream {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #(#user_attrs)*
         #vis enum #name {
-            #variants
+            #(#variants),*
         }
 
         impl #name {

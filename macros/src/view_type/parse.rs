@@ -37,7 +37,9 @@ impl ViewDef {
         let config = ViewConfig::parse(&input.attrs);
 
         let fields = match &input.fields {
-            Fields::Named(fields) => fields.named.iter().map(ViewField::parse).collect(),
+            Fields::Named(fields) => fields.named.iter()
+                .map(ViewField::parse)
+                .collect(),
             _ => panic!("view_type only supports structs with named fields"),
         };
 
@@ -52,16 +54,13 @@ impl ViewDef {
         format!("{}.{}", self.config.schema, self.config.view)
     }
 
-    /// The view's output columns (the field/alias names) — used as the SELECT list
-    /// when querying the view.
-    pub fn column_list(&self) -> String {
-        self.fields.iter().map(|f| f.name_str.as_str()).collect::<Vec<_>>().join(", ")
-    }
 }
 
 impl ViewField {
     fn parse(field: &syn::Field) -> Self {
-        let name = field.ident.clone().expect("view field must have a name");
+        let name = field.ident.clone()
+            .expect("view field must have a name");
+
         let name_str = name.to_string();
         let source = ColumnSource::parse(&field.attrs, &name_str);
         Self { name, name_str, source }
@@ -72,7 +71,10 @@ impl ColumnSource {
     fn parse(attrs: &[Attribute], field: &str) -> Self {
         let attr = attrs
             .iter()
-            .find(|a| a.path().is_ident("pg"))
+            .find(
+                |a| a.path()
+                    .is_ident("pg")
+            )
             .unwrap_or_else(|| panic!("view field `{field}` needs #[pg(view(table.column))]"));
 
         let mut parts: Option<Vec<String>> = None;
@@ -81,13 +83,18 @@ impl ColumnSource {
             if key != "view" {
                 return Err(syn::Error::new(key.span(), "view fields only accept #[pg(view(...))]"));
             }
+
             let content;
             parenthesized!(content in input);
             let mut path = vec![content.parse::<Ident>()?.to_string()];
             while content.peek(Token![.]) {
                 content.parse::<Token![.]>()?;
-                path.push(content.parse::<Ident>()?.to_string());
+                path.push(
+                    content.parse::<Ident>()?
+                        .to_string()
+                );
             }
+
             parts = Some(path);
             Ok(())
         });
@@ -107,7 +114,9 @@ impl ColumnSource {
 impl ViewConfig {
     fn parse(attrs: &[Attribute]) -> Self {
         for attr in attrs {
-            if !attr.path().is_ident("view_type") {
+            if !attr.path()
+                .is_ident("view_type")
+            {
                 continue;
             }
 
@@ -119,7 +128,9 @@ impl ViewConfig {
 
             let _ = attr.parse_nested_meta(|meta| {
                 let key = &meta.path;
-                if let Ok(Lit::Str(s)) = meta.value().and_then(|v| v.parse::<Lit>()) {
+                if let Ok(Lit::Str(s)) = meta.value()
+                    .and_then(|v| v.parse::<Lit>())
+                {
                     if key.is_ident("schema") {
                         schema = Some(s.value());
                     } else if key.is_ident("name") {
@@ -132,11 +143,18 @@ impl ViewConfig {
                         order_by = Some(s.value());
                     }
                 }
+
                 Ok(())
             });
 
             if let (Some(schema), Some(view), Some(export_to)) = (schema, view, export_to) {
-                return Self { schema, view, export_to, filter, order_by };
+                return Self {
+                    schema,
+                    view,
+                    export_to,
+                    filter,
+                    order_by,
+                };
             }
         }
 

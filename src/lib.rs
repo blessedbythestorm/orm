@@ -4,7 +4,7 @@
 //!   that generate `FromRow`, postgres `ToSql`/`FromSql`, TypeScript bindings, and
 //!   strongly-typed CRUD traits from your struct/enum definitions.
 //! - `orm::FromRow` / `QueryExt` — runtime row-deserialization traits.
-//! - `orm::query::*` — `QueryOptions`, `FilterOp`, `Sort`, `Pagination`, `Search`.
+//! - `orm::query::*` — fluent `QueryBuilderExt`, `QueryOptions`, and filters.
 //! - `orm::registry::export_all_types()` — drains the inventory of TS-exportable
 //!   types and writes them to the output dir.
 
@@ -28,7 +28,13 @@ pub mod validate;
 pub mod validator;
 
 pub use export::{ExportBackend, ExportType, export_all_types};
-pub use macros::{api_type, endpoint, enum_type, json_type, table_type, view_type};
+pub use macros::{FromRow, api_type, endpoint, enum_type, json_type, table_type, view_type};
 pub use patch::deserialize_nullable_patch;
 pub use traits::{FromRow, QueryExt};
+
+#[doc(hidden)]
+pub mod __private {
+    pub use tokio_postgres::{Error as PostgresError, Row};
+}
+
 pub use validate::{Valid, Validate, ValidationError, ValidationErrors};

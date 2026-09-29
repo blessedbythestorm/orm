@@ -4,10 +4,22 @@ use quote::{format_ident, quote};
 use super::parse::{ConstraintKindSpec, TableDef};
 
 pub fn generate(table: &TableDef) -> TokenStream {
+    let name = &table.name;
+    let relation = table.full_table_name();
+    let columns = table.fields.iter()
+        .map(|field| field.name_str.as_str());
+
     let trait_def = generate_trait(table);
     let trait_impl = generate_impl(table);
 
     quote! {
+        impl ::orm::query::QueryModel for #name {
+            const RELATION: &'static str = #relation;
+            const COLUMNS: &'static [&'static str] = &[#(#columns),*];
+        }
+
+        impl ::orm::query::TableModel for #name {}
+
         #trait_def
         #trait_impl
     }
@@ -28,15 +40,17 @@ fn generate_trait(table: &TableDef) -> TokenStream {
     let delete_all = format_ident!("delete_{}s", table.name_snake);
     let insert_fields = format_ident!("insert_{}_fields", table.name_snake);
     let update_where = format_ident!("update_{}s_where", table.name_snake);
-    let upserts = unique_keys(table).into_iter().map(|columns| {
-        let method = upsert_method(table, &columns);
-        let selective_method = format_ident!("{}_with", method);
+    let upserts = unique_keys(table)
+        .into_iter()
+        .map(|columns| {
+            let method = upsert_method(table, &columns);
+            let selective_method = format_ident!("{}_with", method);
 
-        quote! {
-            fn #method(&self, data: &#insert_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
-            fn #selective_method(&self, data: &#insert_name, update: &#update_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
-        }
-    });
+            quote! {
+                fn #method(&self, data: &#insert_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
+                fn #selective_method(&self, data: &#insert_name, update: &#update_name) -> impl std::future::Future<Output = anyhow::Result<#name>> + Send;
+            }
+        });
 
     quote! {
         pub trait #trait_name {
@@ -59,7 +73,6 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let trait_name = format_ident!("{}Crud", name);
     let insert_name = format_ident!("{}Insert", name);
     let update_name = format_ident!("{}Update", name);
-
     let get_all = format_ident!("get_{}s", table.name_snake);
     let count_all = format_ident!("count_{}s", table.name_snake);
     let get_one = format_ident!("get_{}", table.name_snake);
@@ -69,669 +82,174 @@ fn generate_impl(table: &TableDef) -> TokenStream {
     let delete_all = format_ident!("delete_{}s", table.name_snake);
     let insert_fields = format_ident!("insert_{}_fields", table.name_snake);
     let update_where = format_ident!("update_{}s_where", table.name_snake);
-
-    let pool_client = quote! { let client = self.get().await?; };
-    let object_client = quote! { let client = self; };
-    let transaction_client = quote! { let client = self; };
-    let pool_get_all_body = generate_get_all(table, &pool_client);
-    let pool_count_all_body = generate_count_all(table, &pool_client);
-    let pool_get_one_body = generate_get_one(table, &pool_client);
-    let pool_create_body = generate_create(table, &pool_client);
-    let pool_update_body = generate_update(table, &pool_client);
-    let pool_delete_body = generate_delete(table, &pool_client);
-    let pool_delete_all_body = generate_delete_all(table, &pool_client);
-    let object_get_all_body = generate_get_all(table, &object_client);
-    let object_count_all_body = generate_count_all(table, &object_client);
-    let object_get_one_body = generate_get_one(table, &object_client);
-    let object_create_body = generate_create(table, &object_client);
-    let object_update_body = generate_update(table, &object_client);
-    let object_delete_body = generate_delete(table, &object_client);
-    let object_delete_all_body = generate_delete_all(table, &object_client);
-    let transaction_get_all_body = generate_get_all(table, &transaction_client);
-    let transaction_count_all_body = generate_count_all(table, &transaction_client);
-    let transaction_get_one_body = generate_get_one(table, &transaction_client);
-    let transaction_create_body = generate_create(table, &transaction_client);
-    let transaction_update_body = generate_update(table, &transaction_client);
-    let transaction_delete_body = generate_delete(table, &transaction_client);
-    let transaction_delete_all_body = generate_delete_all(table, &transaction_client);
-    let pool_insert_fields_body = generate_insert_fields(table, &pool_client);
-    let object_insert_fields_body = generate_insert_fields(table, &object_client);
-    let transaction_insert_fields_body = generate_insert_fields(table, &transaction_client);
-    let pool_update_where_body = generate_update_where(table, &pool_client);
-    let object_update_where_body = generate_update_where(table, &object_client);
-    let transaction_update_where_body = generate_update_where(table, &transaction_client);
-    let pool_upserts = generate_upsert_impls(table, &pool_client);
-    let object_upserts = generate_upsert_impls(table, &object_client);
-    let transaction_upserts = generate_upsert_impls(table, &transaction_client);
+    let primary_key = table.primary_key_name();
+    let not_found = format!("{} not found", name);
+    let no_updates = format!("No fields to update for {}", table.name_snake);
+    let insert_values = collect_insert_values(table);
+    let update_values = collect_update_values(table, &format_ident!("data"), &[]);
+    let upserts = generate_upserts(table);
 
     quote! {
-        impl #trait_name for deadpool_postgres::Pool {
+        impl<C: ::orm::query::QueryBuilderExt + ?Sized> #trait_name for C {
             async fn #get_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<Vec<#name>> {
-                #pool_get_all_body
+                self.select::<#name>().options(opts).fetch_all().await
             }
 
             async fn #count_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<i64> {
-                #pool_count_all_body
+                self.select::<#name>().options(opts).count().await
             }
 
             async fn #get_one(&self, id: &uuid::Uuid) -> anyhow::Result<#name> {
-                #pool_get_one_body
+                self.select::<#name>().where_(#primary_key, ::orm::query::FilterOp::Eq, *id).fetch_one().await
             }
 
             async fn #create(&self, data: &#insert_name) -> anyhow::Result<#name> {
-                #pool_create_body
+                ::orm::validate::Validate::validate(data)?;
+                #insert_values
+                self.insert::<#name>().values(values).returning_one().await
             }
 
             async fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> anyhow::Result<#name> {
-                #pool_update_body
+                ::orm::validate::Validate::validate(data)?;
+                #update_values
+                if values.is_empty() {
+                    anyhow::bail!(#no_updates);
+                }
+                self.update::<#name>().values(values).where_(#primary_key, ::orm::query::FilterOp::Eq, *id).returning_one().await
             }
 
             async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
-                #pool_delete_body
+                let affected = self.delete::<#name>().where_(#primary_key, ::orm::query::FilterOp::Eq, *id).execute().await?;
+                if affected == 0 {
+                    anyhow::bail!(#not_found);
+                }
+                Ok(())
             }
 
             async fn #delete_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<u64> {
-                #pool_delete_all_body
+                self.delete::<#name>().options(opts).execute().await
             }
 
             async fn #insert_fields(&self, values: ::orm::query::InsertValues) -> anyhow::Result<#name> {
-                #pool_insert_fields_body
+                self.insert::<#name>().values(values).returning_one().await
             }
 
             async fn #update_where(&self, opts: ::orm::query::QueryOptions, values: ::orm::query::UpdateValues) -> anyhow::Result<Vec<#name>> {
-                #pool_update_where_body
+                self.update::<#name>().options(opts).values(values).returning().await
             }
 
-            #(#pool_upserts)*
-        }
-
-        impl #trait_name for deadpool_postgres::Object {
-            async fn #get_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<Vec<#name>> {
-                #object_get_all_body
-            }
-
-            async fn #count_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<i64> {
-                #object_count_all_body
-            }
-
-            async fn #get_one(&self, id: &uuid::Uuid) -> anyhow::Result<#name> {
-                #object_get_one_body
-            }
-
-            async fn #create(&self, data: &#insert_name) -> anyhow::Result<#name> {
-                #object_create_body
-            }
-
-            async fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> anyhow::Result<#name> {
-                #object_update_body
-            }
-
-            async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
-                #object_delete_body
-            }
-
-            async fn #delete_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<u64> {
-                #object_delete_all_body
-            }
-
-            async fn #insert_fields(&self, values: ::orm::query::InsertValues) -> anyhow::Result<#name> {
-                #object_insert_fields_body
-            }
-
-            async fn #update_where(&self, opts: ::orm::query::QueryOptions, values: ::orm::query::UpdateValues) -> anyhow::Result<Vec<#name>> {
-                #object_update_where_body
-            }
-
-            #(#object_upserts)*
-        }
-
-        impl<'transaction> #trait_name for tokio_postgres::Transaction<'transaction> {
-            async fn #get_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<Vec<#name>> {
-                #transaction_get_all_body
-            }
-
-            async fn #count_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<i64> {
-                #transaction_count_all_body
-            }
-
-            async fn #get_one(&self, id: &uuid::Uuid) -> anyhow::Result<#name> {
-                #transaction_get_one_body
-            }
-
-            async fn #create(&self, data: &#insert_name) -> anyhow::Result<#name> {
-                #transaction_create_body
-            }
-
-            async fn #update(&self, id: &uuid::Uuid, data: &#update_name) -> anyhow::Result<#name> {
-                #transaction_update_body
-            }
-
-            async fn #delete(&self, id: &uuid::Uuid) -> anyhow::Result<()> {
-                #transaction_delete_body
-            }
-
-            async fn #delete_all(&self, opts: ::orm::query::QueryOptions) -> anyhow::Result<u64> {
-                #transaction_delete_all_body
-            }
-
-            async fn #insert_fields(&self, values: ::orm::query::InsertValues) -> anyhow::Result<#name> {
-                #transaction_insert_fields_body
-            }
-
-            async fn #update_where(&self, opts: ::orm::query::QueryOptions, values: ::orm::query::UpdateValues) -> anyhow::Result<Vec<#name>> {
-                #transaction_update_where_body
-            }
-
-            #(#transaction_upserts)*
+            #(#upserts)*
         }
     }
 }
 
+fn collect_insert_values(table: &TableDef) -> TokenStream {
+    let fields = table.insert_fields()
+        .map(|field| {
+            let name = &field.name;
+            let column = &field.name_str;
+            if field.is_auto_generated {
+                quote! {
+                    if let Some(value) = &data.#name {
+                        values = values.value(#column, value.clone());
+                    }
+                }
+            } else {
+                quote! { values = values.value(#column, data.#name.clone()); }
+            }
+        });
+
+    quote! {
+        let mut values = ::orm::query::InsertValues::new();
+        #(#fields)*
+    }
+}
+
+fn collect_update_values(table: &TableDef, data: &syn::Ident, excluded: &[String]) -> TokenStream {
+    let fields = table.update_fields()
+        .filter(|field| !excluded.contains(&field.name_str))
+        .map(|field| {
+            let name = &field.name;
+            let column = &field.name_str;
+            quote! {
+                if let Some(value) = &#data.#name {
+                    values = values.assign(#column, value.clone());
+                }
+            }
+        });
+
+    quote! {
+        let mut values = ::orm::query::UpdateValues::new();
+        #(#fields)*
+    }
+}
+
 fn unique_keys(table: &TableDef) -> Vec<Vec<String>> {
-    let mut keys: Vec<Vec<String>> = table
-        .fields
-        .iter()
+    let mut keys: Vec<Vec<String>> = table.fields.iter()
         .filter(|field| field.is_primary || field.is_unique)
         .map(|field| vec![field.name_str.clone()])
         .collect();
 
-    keys.extend(table.constraints.iter().filter_map(|constraint| {
-        match &constraint.kind {
-            ConstraintKindSpec::Unique { columns } => Some(columns.clone()),
-            ConstraintKindSpec::Check { .. } => None,
+    for constraint in &table.constraints {
+        if let ConstraintKindSpec::Unique { columns } = &constraint.kind {
+            if !keys.contains(columns) {
+                keys.push(columns.clone());
+            }
         }
-    }));
+    }
 
     keys
 }
 
 fn upsert_method(table: &TableDef, columns: &[String]) -> syn::Ident {
-    format_ident!(
-        "upsert_{}_by_{}",
-        table.name_snake,
-        columns.join("_and_")
-    )
+    format_ident!("upsert_{}_by_{}", table.name_snake, columns.join("_and_"))
 }
 
-fn generate_upsert_impls(table: &TableDef, client_setup: &TokenStream) -> Vec<TokenStream> {
+fn generate_upserts(table: &TableDef) -> Vec<TokenStream> {
     let name = &table.name;
     let insert_name = format_ident!("{}Insert", name);
     let update_name = format_ident!("{}Update", name);
-
     unique_keys(table)
         .into_iter()
         .map(|columns| {
             let method = upsert_method(table, &columns);
-            let body = generate_upsert(table, &columns, client_setup);
             let selective_method = format_ident!("{}_with", method);
-            let selective_body = generate_selective_upsert(table, &columns, client_setup);
+            let insert_values = collect_insert_values(table);
+            let update_values = collect_update_values(table, &format_ident!("update"), &columns);
+            let mut update_columns: Vec<_> = table.update_fields()
+                .filter(|field| !columns.contains(&field.name_str))
+                .map(|field| field.name_str.as_str())
+                .collect();
+
+            let no_op = &columns[0];
+            if update_columns.is_empty() {
+                update_columns.push(no_op);
+            }
 
             quote! {
                 async fn #method(&self, data: &#insert_name) -> anyhow::Result<#name> {
-                    #body
+                    ::orm::validate::Validate::validate(data)?;
+                    #insert_values
+                    self.insert::<#name>().values(values)
+                        .on_conflict(&[#(#columns),*])
+                        .do_update_excluded(&[#(#update_columns),*])
+                        .returning_one().await
                 }
 
                 async fn #selective_method(&self, data: &#insert_name, update: &#update_name) -> anyhow::Result<#name> {
-                    #selective_body
+                    ::orm::validate::Validate::validate(data)?;
+                    ::orm::validate::Validate::validate(update)?;
+                    #insert_values
+                    let insert = self.insert::<#name>().values(values).on_conflict(&[#(#columns),*]);
+                    #update_values
+                    let insert = if values.is_empty() {
+                        insert.do_update_excluded(&[#no_op])
+                    } else {
+                        insert.do_update(values)
+                    };
+                    insert.returning_one().await
                 }
             }
         })
         .collect()
-}
-
-fn generate_selective_upsert(
-    table: &TableDef,
-    conflict_columns: &[String],
-    client_setup: &TokenStream,
-) -> TokenStream {
-    let name = &table.name;
-    let full_table = table.full_table_name();
-    let columns = table.column_list();
-    let conflict_target = conflict_columns.join(", ");
-    let no_op_column = &conflict_columns[0];
-    let err_msg = format!(
-        "Failed to upsert {} by {}",
-        table.name_snake,
-        conflict_columns.join(", ")
-    );
-
-    let insert_collectors = table.insert_fields().map(|field| {
-        let name = &field.name;
-        let column = &field.name_str;
-
-        if field.is_auto_generated {
-            quote! {
-                if let Some(ref value) = data.#name {
-                    insert_columns.push(#column);
-                    params.push(value as &(dyn tokio_postgres::types::ToSql + Sync));
-                }
-            }
-        }
-        else {
-            quote! {
-                insert_columns.push(#column);
-                params.push(&data.#name as &(dyn tokio_postgres::types::ToSql + Sync));
-            }
-        }
-    });
-
-    let update_fields: Vec<_> = table
-        .update_fields()
-        .filter(|field| !conflict_columns.contains(&field.name_str))
-        .collect();
-
-    let assignment_builders = update_fields.iter().map(|field| {
-        let name = &field.name;
-        let column = &field.name_str;
-
-        quote! {
-            if let Some(ref value) = update.#name {
-                params.push(value as &(dyn tokio_postgres::types::ToSql + Sync));
-                assignments.push(format!("{} = ${}", #column, params.len()));
-            }
-        }
-    });
-
-    quote! {
-        use ::orm::FromRow;
-
-        #client_setup
-        let mut insert_columns: Vec<&str> = Vec::new();
-        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-
-        #(#insert_collectors)*
-
-        let placeholders = (1..=insert_columns.len())
-            .map(|index| format!("${}", index))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut assignments = Vec::new();
-
-        #(#assignment_builders)*
-
-        if assignments.is_empty() {
-            assignments.push(format!("{} = EXCLUDED.{}", #no_op_column, #no_op_column));
-        }
-
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING {}",
-            #full_table,
-            insert_columns.join(", "),
-            placeholders,
-            #conflict_target,
-            assignments.join(", "),
-            #columns,
-        );
-
-        let row = client.query_one(&sql, &params).await
-            .map_err(|error| anyhow::Error::new(error).context(#err_msg))?;
-
-        #name::from_row(&row)
-            .map_err(|error| anyhow::Error::new(error).context("Row parse error"))
-    }
-}
-
-fn generate_upsert(
-    table: &TableDef,
-    conflict_columns: &[String],
-    client_setup: &TokenStream,
-) -> TokenStream {
-    let name = &table.name;
-    let full_table = table.full_table_name();
-    let columns = table.column_list();
-    let conflict_target = conflict_columns.join(", ");
-    let err_msg = format!(
-        "Failed to upsert {} by {}",
-        table.name_snake,
-        conflict_columns.join(", ")
-    );
-
-    let collectors = table.insert_fields().map(|field| {
-        let name = &field.name;
-        let column = &field.name_str;
-
-        if field.is_auto_generated {
-            quote! {
-                if let Some(ref value) = data.#name {
-                    insert_columns.push(#column);
-                    params.push(value as &(dyn tokio_postgres::types::ToSql + Sync));
-                }
-            }
-        }
-        else {
-            quote! {
-                insert_columns.push(#column);
-                params.push(&data.#name as &(dyn tokio_postgres::types::ToSql + Sync));
-            }
-        }
-    });
-
-    let mut update_columns: Vec<&str> = table
-        .update_fields()
-        .filter(|field| !conflict_columns.contains(&field.name_str))
-        .map(|field| field.name_str.as_str())
-        .collect();
-
-    if update_columns.is_empty() {
-        update_columns.push(&conflict_columns[0]);
-    }
-
-    let assignments = update_columns
-        .iter()
-        .map(|column| format!("{column} = EXCLUDED.{column}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    quote! {
-        use ::orm::FromRow;
-
-        #client_setup
-        let mut insert_columns: Vec<&str> = Vec::new();
-        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-
-        #(#collectors)*
-
-        let placeholders = (1..=insert_columns.len())
-            .map(|index| format!("${}", index))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING {}",
-            #full_table,
-            insert_columns.join(", "),
-            placeholders,
-            #conflict_target,
-            #assignments,
-            #columns,
-        );
-
-        let row = client.query_one(&sql, &params).await
-            .map_err(|error| anyhow::Error::new(error).context(#err_msg))?;
-
-        #name::from_row(&row)
-            .map_err(|error| anyhow::Error::new(error).context("Row parse error"))
-    }
-}
-
-fn generate_get_all(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
-    let name = &table.name;
-    let full_table = table.full_table_name();
-    let columns = table.column_list();
-    let base_sql = format!("SELECT {} FROM {}", columns, full_table);
-    let err_msg = format!("Failed to get {}s", table.name_snake);
-
-    quote! {
-        use ::orm::FromRow;
-
-        #client_setup
-        let (where_clause, _) = opts.build_where_clause(1);
-        let suffix = opts.to_sql_suffix();
-        let sql = format!("{}{}{}", #base_sql, where_clause, suffix);
-
-        let rows = client.query(&sql, &opts.filter_params()).await
-            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
-
-        rows.iter()
-            .map(|row| #name::from_row(row).map_err(|e| anyhow::Error::new(e).context("Row parse error")))
-            .collect()
-    }
-}
-
-fn generate_count_all(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
-    let full_table = table.full_table_name();
-    let err_msg = format!("Failed to count {}s", table.name_snake);
-
-    quote! {
-        #client_setup
-        let (where_clause, _) = opts.build_where_clause(1);
-        let sql = format!("SELECT COUNT(*) AS count FROM {}{}", #full_table, where_clause);
-        let row = client.query_one(&sql, &opts.filter_params()).await
-            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
-        row.try_get::<_, i64>("count")
-            .map_err(|e| anyhow::Error::new(e).context("Count parse error"))
-    }
-}
-
-fn generate_get_one(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
-    let name = &table.name;
-    let full_table = table.full_table_name();
-    let columns = table.column_list();
-    let primary_key = table.primary_key_name();
-    let sql = format!("SELECT {} FROM {} WHERE {} = $1", columns, full_table, primary_key);
-    let err_msg = format!("Failed to get {}", table.name_snake);
-
-    quote! {
-        use ::orm::FromRow;
-
-        #client_setup
-        let row = client.query_one(#sql, &[id]).await
-            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
-
-        #name::from_row(&row).map_err(|e| anyhow::Error::new(e).context("Row parse error"))
-    }
-}
-
-fn generate_create(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
-    let name = &table.name;
-    let full_table = table.full_table_name();
-    let columns = table.column_list();
-    let err_msg = format!("Failed to create {}", table.name_snake);
-
-    let collectors = table.insert_fields().map(|f| {
-        let field = &f.name;
-        let field_str = &f.name_str;
-
-        if f.is_auto_generated {
-            quote! {
-                if let Some(ref value) = data.#field {
-                    insert_columns.push(#field_str);
-                    params.push(value as &(dyn tokio_postgres::types::ToSql + Sync));
-                }
-            }
-        } else {
-            quote! {
-                insert_columns.push(#field_str);
-                params.push(&data.#field as &(dyn tokio_postgres::types::ToSql + Sync));
-            }
-        }
-    });
-
-    quote! {
-        use ::orm::FromRow;
-
-        #client_setup
-        let mut insert_columns: Vec<&str> = Vec::new();
-        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-
-        #(#collectors)*
-
-        let sql = if insert_columns.is_empty() {
-            format!("INSERT INTO {} DEFAULT VALUES RETURNING {}", #full_table, #columns)
-        } else {
-            let placeholders = (1..=insert_columns.len())
-                .map(|i| format!("${}", i))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
-                #full_table,
-                insert_columns.join(", "),
-                placeholders,
-                #columns
-            )
-        };
-
-        let row = client.query_one(&sql, &params).await
-            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
-
-        #name::from_row(&row).map_err(|e| anyhow::Error::new(e).context("Row parse error"))
-    }
-}
-
-fn generate_update(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
-    let name = &table.name;
-    let full_table = table.full_table_name();
-    let columns = table.column_list();
-    let err_msg = format!("Failed to update {}", table.name_snake);
-    let no_fields_err = format!("No fields to update for {}", table.name_snake);
-    let primary_key = table.primary_key_name();
-
-    let update_fields: Vec<_> = table.update_fields().collect();
-
-    let set_clause_builders = update_fields.iter().map(|f| {
-        let field = &f.name;
-        let field_str = &f.name_str;
-        quote! {
-            if data.#field.is_some() {
-                if !set_clauses.is_empty() { set_clauses.push_str(", "); }
-                param_idx += 1;
-                set_clauses.push_str(&format!("{} = ${}", #field_str, param_idx));
-                has_updates = true;
-            }
-        }
-    });
-
-    let param_collectors = update_fields.iter().map(|f| {
-        let field = &f.name;
-        quote! {
-            if let Some(ref val) = data.#field {
-                params.push(val as &(dyn tokio_postgres::types::ToSql + Sync));
-            }
-        }
-    });
-
-    quote! {
-        use ::orm::FromRow;
-
-        #client_setup
-        let mut set_clauses = String::new();
-        let mut param_idx = 0usize;
-        let mut has_updates = false;
-
-        #(#set_clause_builders)*
-
-        if !has_updates {
-            anyhow::bail!(#no_fields_err);
-        }
-
-        param_idx += 1;
-        let sql = format!("UPDATE {} SET {} WHERE {} = ${} RETURNING {}", #full_table, set_clauses, #primary_key, param_idx, #columns);
-
-        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-        #(#param_collectors)*
-        params.push(id);
-
-        let row = client.query_one(&sql, &params).await
-            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
-
-        #name::from_row(&row).map_err(|e| anyhow::Error::new(e).context("Row parse error"))
-    }
-}
-
-fn generate_delete(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
-    let name = &table.name;
-    let full_table = table.full_table_name();
-    let primary_key = table.primary_key_name();
-    let sql = format!("DELETE FROM {} WHERE {} = $1", full_table, primary_key);
-    let err_msg = format!("Failed to delete {}", table.name_snake);
-    let not_found_err = format!("{} not found", name);
-
-    quote! {
-        #client_setup
-        let result = client.execute(#sql, &[id]).await
-            .map_err(|e| anyhow::Error::new(e).context(#err_msg))?;
-
-        if result == 0 {
-            anyhow::bail!(#not_found_err);
-        }
-
-        Ok(())
-    }
-}
-
-fn generate_delete_all(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
-    let full_table = table.full_table_name();
-    let err_msg = format!("Failed to delete {}s", table.name_snake);
-
-    quote! {
-        #client_setup
-        opts.validate_for_filtered_write()?;
-        let (where_clause, _) = opts.build_where_clause(1);
-        if where_clause.is_empty() {
-            anyhow::bail!("bulk delete requires at least one filter");
-        }
-        let sql = format!("DELETE FROM {}{}", #full_table, where_clause);
-        client.execute(&sql, &opts.filter_params()).await
-            .map_err(|e| anyhow::Error::new(e).context(#err_msg))
-    }
-}
-
-fn generate_insert_fields(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
-    let name = &table.name;
-    let full_table = table.full_table_name();
-    let columns = table.column_list();
-    let allowed_columns = table.fields.iter().map(|field| field.name_str.as_str());
-    let err_msg = format!("Failed to insert {} fields", table.name_snake);
-
-    quote! {
-        use ::orm::FromRow;
-
-        #client_setup
-        let allowed_columns = &[#(#allowed_columns),*];
-        let sql = if values.is_empty() {
-            format!("INSERT INTO {} DEFAULT VALUES RETURNING {}", #full_table, #columns)
-        } else {
-            let (insert_columns, placeholders) = values.build(allowed_columns)?;
-            format!(
-                "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
-                #full_table,
-                insert_columns,
-                placeholders,
-                #columns,
-            )
-        };
-        let row = client.query_one(&sql, &values.params()).await
-            .map_err(|error| anyhow::Error::new(error).context(#err_msg))?;
-
-        #name::from_row(&row)
-            .map_err(|error| anyhow::Error::new(error).context("Row parse error"))
-    }
-}
-
-fn generate_update_where(table: &TableDef, client_setup: &TokenStream) -> TokenStream {
-    let name = &table.name;
-    let full_table = table.full_table_name();
-    let columns = table.column_list();
-    let allowed_columns = table.fields.iter().map(|field| field.name_str.as_str());
-    let err_msg = format!("Failed to update filtered {}s", table.name_snake);
-
-    quote! {
-        use ::orm::FromRow;
-
-        #client_setup
-        opts.validate_for_filtered_write()?;
-        let allowed_columns = &[#(#allowed_columns),*];
-        let (set_clause, next_param) = values.build(1, allowed_columns)?;
-        let (where_clause, _) = opts.build_where_clause(next_param);
-
-        if where_clause.is_empty() {
-            anyhow::bail!("filtered update requires at least one filter");
-        }
-
-        let sql = format!(
-            "UPDATE {} SET {}{} RETURNING {}",
-            #full_table,
-            set_clause,
-            where_clause,
-            #columns,
-        );
-        let mut params = values.params();
-        params.extend(opts.filter_params());
-        let rows = client.query(&sql, &params).await
-            .map_err(|error| anyhow::Error::new(error).context(#err_msg))?;
-
-        rows.iter()
-            .map(|row| #name::from_row(row).map_err(|error| anyhow::Error::new(error).context("Row parse error")))
-            .collect()
-    }
 }

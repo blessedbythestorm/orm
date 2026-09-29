@@ -8,9 +8,14 @@ use super::parse::{
 pub fn generate(table: &TableDef) -> TokenStream {
     let schema = &table.config.schema;
     let name = &table.config.table;
-    let columns = table.fields.iter().map(column_item);
-    let constraints = table.constraints.iter().map(constraint_item);
-    let indexes = table.indexes.iter().map(index_item);
+    let columns = table.fields.iter()
+        .map(column_item);
+
+    let constraints = table.constraints.iter()
+        .map(constraint_item);
+
+    let indexes = table.indexes.iter()
+        .map(index_item);
 
     quote! {
         inventory::submit! {
@@ -27,9 +32,16 @@ pub fn generate(table: &TableDef) -> TokenStream {
 
 fn constraint_item(spec: &ConstraintSpec) -> TokenStream {
     let name = &spec.name;
+    let inferred_name_prefix = match &spec.inferred_name_prefix {
+        Some(prefix) => quote! { Some(#prefix) },
+        None => quote! { None },
+    };
+
     let kind = match &spec.kind {
         ConstraintKindSpec::Unique { columns } => {
-            let columns = columns.iter().map(String::as_str);
+            let columns = columns.iter()
+                .map(String::as_str);
+
             quote! {
                 ::orm::schema::registry::ConstraintKindItem::Unique { columns: &[ #(#columns),* ] }
             }
@@ -40,13 +52,19 @@ fn constraint_item(spec: &ConstraintSpec) -> TokenStream {
     };
 
     quote! {
-        ::orm::schema::registry::ConstraintItem { name: #name, kind: #kind }
+        ::orm::schema::registry::ConstraintItem {
+            name: #name,
+            inferred_name_prefix: #inferred_name_prefix,
+            kind: #kind,
+        }
     }
 }
 
 fn index_item(spec: &IndexSpec) -> TokenStream {
     let name = &spec.name;
-    let columns = spec.columns.iter().map(String::as_str);
+    let columns = spec.columns.iter()
+        .map(String::as_str);
+
     let unique = spec.unique;
     let predicate = match &spec.predicate {
         Some(value) => quote! { Some(#value) },
@@ -72,6 +90,7 @@ fn column_item(field: &FieldDef) -> TokenStream {
         Some(value) => quote! { Some(#value) },
         None => quote! { None },
     };
+
     let foreign_key = match &field.foreign_key {
         Some(spec) => foreign_key_item(spec),
         None => quote! { None },

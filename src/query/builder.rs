@@ -97,7 +97,7 @@ impl LogicalOp {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct QueryOptions {
     pub groups: Vec<FilterGroup>,
     pub limit: Option<u32>,
@@ -123,7 +123,7 @@ impl RowLock {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FilterGroup {
     pub filters: Vec<Filter>,
     pub op: LogicalOp,
@@ -138,12 +138,18 @@ impl FilterGroup {
         Self { filters: Vec::new(), op: LogicalOp::Or }
     }
 
-    pub fn filter<T: FilterValue>(mut self, field: impl Into<String>, op: FilterOp, value: T) -> Self {
+    pub fn filter<T: FilterValue>(
+        mut self,
+        field: impl Into<String>,
+        op: FilterOp,
+        value: T,
+    ) -> Self {
         if !op.needs_value() {
             self.filters.push(Filter { field: field.into(), op, value: None });
         } else if let Some(converted) = value.into_filter_value(op) {
             self.filters.push(Filter { field: field.into(), op, value: Some(converted) });
         }
+
         self
     }
 
@@ -153,6 +159,7 @@ impl FilterGroup {
             op: FilterOp::IsNull,
             value: None,
         });
+
         self
     }
 
@@ -162,6 +169,7 @@ impl FilterGroup {
             op: FilterOp::IsNotNull,
             value: None,
         });
+
         self
     }
 }
@@ -172,19 +180,24 @@ impl From<Search> for FilterGroup {
         let Some(query) = search.query.clone() else {
             return group;
         };
+
         for field in search.field_list() {
             if !is_identifier(&field) {
                 continue;
             }
-            if let Some(converted) = query.clone().into_filter_value(FilterOp::ILike) {
+
+            if let Some(converted) = query.clone()
+                .into_filter_value(FilterOp::ILike)
+            {
                 group.filters.push(Filter { field, op: FilterOp::ILike, value: Some(converted) });
             }
         }
+
         group
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Filter {
     pub field: String,
     pub op: FilterOp,
@@ -241,7 +254,7 @@ impl FilterOp {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QuerySort {
     pub field: String,
     pub order: SortOrder,
@@ -265,7 +278,10 @@ impl QueryOptions {
     /// else may pass.
     pub fn from_params(pagination: Pagination, sort: Sort, search: Search) -> Self {
         let mut options = Self::new()
-            .limit(pagination.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT))
+            .limit(
+                pagination.limit.unwrap_or(DEFAULT_LIMIT)
+                    .min(MAX_LIMIT)
+            )
             .offset(pagination.offset.unwrap_or(0))
             .filter_group(search.into());
 
@@ -300,10 +316,16 @@ impl QueryOptions {
         } else {
             self.secondary_sorts.push(sort);
         }
+
         self
     }
 
-    pub fn filter<T: FilterValue>(mut self, field: impl Into<String>, op: FilterOp, value: T) -> Self {
+    pub fn filter<T: FilterValue>(
+        mut self,
+        field: impl Into<String>,
+        op: FilterOp,
+        value: T,
+    ) -> Self {
         if !op.needs_value() {
             self.groups.push(FilterGroup {
                 filters: vec![Filter { field: field.into(), op, value: None }],
@@ -315,16 +337,25 @@ impl QueryOptions {
                 op: LogicalOp::And,
             });
         }
+
         self
     }
 
     pub fn is_null(mut self, field: impl Into<String>) -> Self {
-        self.groups.push(FilterGroup::and().is_null(field));
+        self.groups.push(
+            FilterGroup::and()
+                .is_null(field)
+        );
+
         self
     }
 
     pub fn is_not_null(mut self, field: impl Into<String>) -> Self {
-        self.groups.push(FilterGroup::and().is_not_null(field));
+        self.groups.push(
+            FilterGroup::and()
+                .is_not_null(field)
+        );
+
         self
     }
 
@@ -332,6 +363,7 @@ impl QueryOptions {
         if !group.filters.is_empty() {
             self.groups.push(group);
         }
+
         self
     }
 
@@ -364,7 +396,9 @@ impl QueryOptions {
     }
 
     pub fn build_where_clause(&self, param_offset: usize) -> (String, usize) {
-        let non_empty_groups: Vec<_> = self.groups.iter().filter(|g| !g.filters.is_empty()).collect();
+        let non_empty_groups: Vec<_> = self.groups.iter()
+            .filter(|g| !g.filters.is_empty())
+            .collect();
 
         if non_empty_groups.is_empty() {
             return (String::new(), param_offset);
@@ -386,6 +420,7 @@ impl QueryOptions {
                         } else {
                             format!("{} {} ${}", f.field, f.op.as_sql(), param_idx)
                         };
+
                         param_idx += 1;
                         s
                     } else {
@@ -395,7 +430,11 @@ impl QueryOptions {
                 .collect();
 
             if conditions.len() == 1 {
-                group_conditions.push(conditions.into_iter().next().unwrap());
+                group_conditions.push(
+                    conditions.into_iter()
+                        .next()
+                        .unwrap()
+                );
             } else {
                 group_conditions.push(format!("({})", conditions.join(group.op.as_str())));
             }
@@ -408,31 +447,46 @@ impl QueryOptions {
         self.groups
             .iter()
             .flat_map(|g| g.filters.iter())
-            .filter_map(|f| f.value
-                .as_deref()
-                .map(|value| value as &(dyn ToSql + Sync)))
+            .filter_map(
+                |f| f.value
+                    .as_deref()
+                    .map(|value| value as &(dyn ToSql + Sync))
+            )
             .collect()
     }
 
     pub fn to_sql_suffix(&self) -> String {
+        self.to_sql_suffix_with(
+            |field| is_identifier(field)
+                .then(|| field.to_string())
+        )
+    }
+
+    pub(crate) fn to_sql_suffix_with(&self, column: impl Fn(&str) -> Option<String>) -> String {
         let mut sql = String::new();
-        if let Some(field) = self.sort_by.as_deref().filter(|field| is_identifier(field)) {
+        if let Some(field) = self.sort_by.as_deref()
+            .and_then(&column)
+        {
             let _ = write!(sql, " ORDER BY {} {}", field, self.sort_order.unwrap_or_default().as_str());
             for sort in &self.secondary_sorts {
-                if is_identifier(&sort.field) {
-                    let _ = write!(sql, ", {} {}", sort.field, sort.order.as_str());
+                if let Some(field) = column(&sort.field) {
+                    let _ = write!(sql, ", {} {}", field, sort.order.as_str());
                 }
             }
         }
+
         if let Some(limit) = self.limit {
             let _ = write!(sql, " LIMIT {}", limit);
         }
+
         if let Some(offset) = self.offset {
             let _ = write!(sql, " OFFSET {}", offset);
         }
+
         if let Some(row_lock) = self.row_lock {
             sql.push_str(row_lock.as_sql());
         }
+
         sql
     }
 }

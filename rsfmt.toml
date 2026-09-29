@@ -1,0 +1,21 @@
+version = 2
+preset = "readable"
+indent = 4
+
+[global.chains]
+inline = 1
+breaks = "preserve"
+
+[global.spacing]
+after = 1
+mode = "at-most"
+multi-line = { after = 1, mode = "exact" }
+
+[argument.chains]
+breaks = "normalize"
+
+[lists.calls]
+trailing-comma = "preserve"
+
+[namespace]
+mode = "preserve"

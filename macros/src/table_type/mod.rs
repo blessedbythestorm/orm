@@ -1,4 +1,6 @@
+mod check_name;
 mod crud;
+mod expression;
 mod from_row;
 mod insert;
 mod parse;
@@ -22,7 +24,10 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let table_attr: syn::Attribute = syn::parse_quote!(#[table_type(#attr)]);
     input.attrs.push(table_attr);
 
-    let table = TableDef::parse(&input);
+    let table = match TableDef::parse(&input) {
+        Ok(table) => table,
+        Err(error) => return error.to_compile_error(),
+    };
 
     let struct_def = struct_def::generate(&table, &input);
     let from_row = from_row::generate(&table);

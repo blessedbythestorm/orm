@@ -5,7 +5,11 @@ use super::model::{Column, EnumType, ForeignKey, Index, Table};
 
 /// Renders an ordered list of schema changes into a single SQL migration script.
 pub fn render(changes: &[SchemaChange]) -> String {
-    let mut script = changes.iter().map(SchemaChange::to_string).collect::<Vec<_>>().join("\n\n");
+    let mut script = changes.iter()
+        .map(SchemaChange::to_string)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
     script.push('\n');
     script
 }
@@ -25,7 +29,7 @@ impl Display for SchemaChange {
             Self::RenameTable { table, to } => {
                 write!(f, "ALTER TABLE {} RENAME TO {to};", table.qualified_name())
             }
-            Self::AlterColumn { table, op } => write!(f, "ALTER TABLE {} {op};", table.qualified_name()),
+            Self::AlterColumn { table, op } => alter_column(f, table, op),
             Self::AlterTable { table, op } => match op {
                 TableOp::CreateIndex(index) => {
                     write!(f, "{}", create_index(&table.schema, &table.name, index))
@@ -59,10 +63,10 @@ impl Display for ColumnOp {
             Self::Add(column) => write!(f, "ADD COLUMN {}", column_definition(column)),
             Self::Drop(column) => write!(f, "DROP COLUMN {column}"),
             Self::Rename { from, to } => write!(f, "RENAME COLUMN {from} TO {to}"),
-            Self::SetType { column, sql_type, using: Some(expression) } => {
+            Self::SetType { column, sql_type, using: Some(expression), .. } => {
                 write!(f, "ALTER COLUMN {column} TYPE {sql_type} USING {expression}")
             }
-            Self::SetType { column, sql_type, using: None } => {
+            Self::SetType { column, sql_type, using: None, .. } => {
                 write!(f, "ALTER COLUMN {column} TYPE {sql_type}")
             }
             Self::SetNullable { column, nullable } => {
@@ -77,8 +81,43 @@ impl Display for ColumnOp {
     }
 }
 
+fn alter_column(
+    formatter: &mut Formatter<'_>,
+    table: &super::model::TableReference,
+    operation: &ColumnOp,
+) -> fmt::Result {
+    let qualified = table.qualified_name();
+    if let ColumnOp::SetType {
+        column,
+        default_before,
+        default_after,
+        ..
+    } = operation
+    {
+        if default_before.is_some() {
+            writeln!(formatter, "ALTER TABLE {qualified} ALTER COLUMN {column} DROP DEFAULT;")?;
+        }
+
+        write!(formatter, "ALTER TABLE {qualified} {operation};")?;
+        if let Some(default) = default_after {
+            write!(
+                formatter,
+                "\nALTER TABLE {qualified} ALTER COLUMN {column} SET DEFAULT {default};",
+            )?;
+        }
+
+        Ok(())
+    }
+    else {
+        write!(formatter, "ALTER TABLE {qualified} {operation};")
+    }
+}
+
 fn create_type(enum_type: &EnumType) -> String {
-    let values: Vec<String> = enum_type.values.iter().map(|value| format!("'{value}'")).collect();
+    let values: Vec<String> = enum_type.values.iter()
+        .map(|value| format!("'{value}'"))
+        .collect();
+
     format!("CREATE TYPE {} AS ENUM ({});", enum_type.name, values.join(", "))
 }
 
@@ -93,6 +132,7 @@ fn replace_enum(old: &EnumType, new: &EnumType, dependents: &[EnumDependent]) ->
         Some((schema, bare)) => format!("{schema}.{bare}_old"),
         None => format!("{}_old", new.name),
     };
+
     let bare_renamed = match new.name.rsplit_once('.') {
         Some((_, bare)) => format!("{bare}_old"),
         None => format!("{}_old", new.name),
@@ -158,10 +198,13 @@ fn cast_expression(old: &EnumType, new: &EnumType, dependent: &EnumDependent) ->
 /// longer has: the column's default when it is still a valid value, else NULL
 /// when the column is nullable, else the first value of the new enum.
 fn fallback_value(new: &EnumType, dependent: &EnumDependent) -> String {
-    let default = dependent.default.as_deref().and_then(default_literal);
+    let default = dependent.default.as_deref()
+        .and_then(default_literal);
 
     if let Some(value) = default {
-        if new.values.iter().any(|candidate| candidate == value) {
+        if new.values.iter()
+            .any(|candidate| candidate == value)
+        {
             return format!("'{value}'");
         }
     }
@@ -185,10 +228,16 @@ fn default_literal(default: &str) -> Option<&str> {
 }
 
 fn create_table(table: &Table) -> String {
-    let mut entries: Vec<String> = table.columns.iter().map(column_definition).collect();
+    let mut entries: Vec<String> = table.columns.iter()
+        .map(column_definition)
+        .collect();
 
     let primary_key: Vec<&str> =
-        table.columns.iter().filter(|column| column.primary_key).map(|column| column.name.as_str()).collect();
+        table.columns.iter()
+            .filter(|column| column.primary_key)
+            .map(|column| column.name.as_str())
+            .collect();
+
     if !primary_key.is_empty() {
         entries.push(format!("PRIMARY KEY ({})", primary_key.join(", ")));
     }
@@ -225,15 +274,19 @@ fn column_definition(column: &Column) -> String {
     if !column.nullable {
         parts.push("NOT NULL".to_string());
     }
+
     if let Some(default) = &column.default {
         parts.push(format!("DEFAULT {default}"));
     }
+
     if column.unique {
         parts.push("UNIQUE".to_string());
     }
+
     if let Some(foreign_key) = &column.foreign_key {
         parts.push(references_clause(foreign_key));
     }
+
     parts.join(" ")
 }
 

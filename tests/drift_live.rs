@@ -2,12 +2,13 @@ use orm::{table_type, view_type};
 use uuid::Uuid;
 
 #[table_type(schema = "orm_drift_regression", name = "widgets", export_to = "types/drift.ts")]
-#[table(
-    check("widgets_block_check" = "false"),
-    index(name = "widgets_id_present_idx", id, where = "id IS NOT NULL"),
-)]
+#[pg(validate(
+        false,
+        name = "widgets_block_check",
+    ))]
 pub struct Widget {
     #[pg(primary)]
+    #[pg(index(name = "widgets_id_present_idx", where(is_not_null(id))))]
     pub id: Uuid,
 }
 
@@ -24,21 +25,37 @@ fn live_drift_rejects_changed_checks_and_view_columns() {
         return;
     };
 
-    let directory = std::env::temp_dir().join(format!("orm-drift-regression-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&directory).expect("create migration directory");
-    orm::migrate::generate(&directory, "drift_regression", false).expect("generate migration");
-    orm::migrate::apply(&directory, Some(url.clone())).expect("apply migration");
-    orm::migrate::diff_live(&directory, Some(url.clone()), None, true, false)
-        .expect("unchanged schema verifies");
+    let directory = std::env::temp_dir()
+        .join(format!("orm-drift-regression-{}", Uuid::new_v4()));
+
+    std::fs::create_dir_all(&directory)
+        .expect("create migration directory");
+
+    orm::migrate::generate(&directory, "drift_regression", false)
+        .expect("generate migration");
+
+    orm::migrate::apply(&directory, Some(url.clone()))
+        .expect("apply migration");
+
+    orm::migrate::diff_live(
+        &directory,
+        Some(url.clone()),
+        None,
+        true,
+        false
+    )
+    .expect("unchanged schema verifies");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
+
     runtime.block_on(async {
         let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
             .expect("connect");
+
         let connection_task = tokio::spawn(connection);
 
         client.batch_execute(
@@ -52,14 +69,22 @@ fn live_drift_rejects_changed_checks_and_view_columns() {
         connection_task.abort();
     });
 
-    let changed_check = orm::migrate::diff_live(&directory, Some(url.clone()), None, true, false)
-        .expect_err("a CHECK that now accepts rows must be drift");
+    let changed_check = orm::migrate::diff_live(
+        &directory,
+        Some(url.clone()),
+        None,
+        true,
+        false
+    )
+    .expect_err("a CHECK that now accepts rows must be drift");
+
     assert!(changed_check.to_string().contains("database drifted"), "{changed_check:#}");
 
     runtime.block_on(async {
         let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
             .expect("connect");
+
         let connection_task = tokio::spawn(connection);
 
         client.batch_execute(
@@ -75,14 +100,22 @@ fn live_drift_rejects_changed_checks_and_view_columns() {
         connection_task.abort();
     });
 
-    let changed_index = orm::migrate::diff_live(&directory, Some(url.clone()), None, true, false)
-        .expect_err("a changed partial-index predicate must be drift");
+    let changed_index = orm::migrate::diff_live(
+        &directory,
+        Some(url.clone()),
+        None,
+        true,
+        false
+    )
+    .expect_err("a changed partial-index predicate must be drift");
+
     assert!(changed_index.to_string().contains("database drifted"), "{changed_index:#}");
 
     runtime.block_on(async {
         let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
             .expect("connect");
+
         let connection_task = tokio::spawn(connection);
 
         client.batch_execute(
@@ -92,23 +125,33 @@ fn live_drift_rejects_changed_checks_and_view_columns() {
         )
         .await
         .expect("rename view output");
+
         let error = client
             .query("SELECT id FROM orm_drift_regression.widget_view", &[])
             .await
             .expect_err("the expected view column is absent");
+
         assert_eq!(error.as_db_error().expect("database error").code().code(), "42703");
 
         connection_task.abort();
     });
 
-    let changed_view = orm::migrate::diff_live(&directory, Some(url.clone()), None, true, false)
-        .expect_err("a renamed view output must be drift");
+    let changed_view = orm::migrate::diff_live(
+        &directory,
+        Some(url.clone()),
+        None,
+        true,
+        false
+    )
+    .expect_err("a renamed view output must be drift");
+
     assert!(changed_view.to_string().contains("database drifted"), "{changed_view:#}");
 
     runtime.block_on(async {
         let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
             .expect("connect");
+
         let connection_task = tokio::spawn(connection);
 
         client.batch_execute("DROP SCHEMA orm_drift_regression CASCADE; DROP TABLE public._orm_migrations;")
@@ -117,5 +160,7 @@ fn live_drift_rejects_changed_checks_and_view_columns() {
 
         connection_task.abort();
     });
-    std::fs::remove_dir_all(directory).expect("remove migration directory");
+
+    std::fs::remove_dir_all(directory)
+        .expect("remove migration directory");
 }
