@@ -11,11 +11,12 @@ with handwritten queries.
 ## Install and create an Axum project
 
 `orm` is currently consumed from Git. Use `orm` only; the `macros` crate is an
-implementation detail re-exported by it.
+implementation detail re-exported by it. Pin a revision in applications so a
+schema or query change reaches them only when the pin moves:
 
 ```toml
 [dependencies]
-orm = { git = "https://github.com/blessedbythestorm/orm.git", branch = "main" }
+orm = { git = "https://github.com/blessedbythestorm/orm.git", rev = "<commit>" }
 
 # Direct dependencies used by macro expansions and the server.
 anyhow = "1"
@@ -222,6 +223,55 @@ when an external contract requires a specific database identifier.
 registered enum variant. Strings are always quoted values; a string such as
 `"now()"` never becomes executable SQL. `pg(validate(...))` creates a database
 CHECK constraint, while `api(validate(...))` validates application inputs.
+
+#### Database rules with `pg(validate(...))`
+
+A rule is a Rust-syntax expression over the model's own columns, checked at
+compile time and rendered to SQL. On a field it constrains that field; on the
+struct it can relate several:
+
+```rust
+#[pg(validate(implies(one_of(operation, ["dispatch", "void"]), balance_exact == 0)))]
+#[pg(validate(required_if(actor_id, operation != "opening")))]
+#[pg(validate(num_nonnulls(coil_id, ink_id) == 1))]
+pub struct Movement {
+    #[pg(validate(delta_exact != 0))]
+    pub delta_exact: NumericText,
+    // ...
+}
+```
+
+| Form | Meaning |
+| --- | --- |
+| `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `\|\|`, `!` | Comparison and boolean logic |
+| `+`, `-`, `*`, `/`, unary `-` | Arithmetic |
+| Literals, `"text"`, `Enum::Variant` | Numbers, booleans, strings and registered enum values |
+| `is_null(a)`, `is_not_null(a)` | Explicit NULL tests |
+| `one_of(a, [x, y])`, `between(a, low, high)`, `matches(a, "regex")` | Membership, ranges, POSIX pattern |
+| `exactly_one(a, b, ...)`, `num_nonnulls(a, b, ...)` | Exactly one present / how many are present |
+| `implies(condition, rule)` | `rule` must hold whenever `condition` does |
+| `present_iff(a, condition)` | `a` is set exactly when `condition` holds |
+| `required_if(a, condition)` | `a` must be set when `condition` holds |
+| `length`, `char_length`, `trim`, `btrim`, `abs` | Scalar functions |
+
+Unknown columns and functions fail compilation. So does a rule that could
+evaluate to SQL UNKNOWN because it reads a nullable column without deciding
+what NULL means; PostgreSQL would silently accept such a row. Test nullable
+columns with `is_null`/`is_not_null` or use a presence rule.
+
+Rule names are inferred and stable, so a declaration and its migration stay in
+step:
+
+- a field rule is `<table>_<field>_check`;
+- `present_iff`/`required_if` on a column is `<table>_<column>_presence_check`;
+- any other struct rule is `<table>_<first two referenced columns>` followed by
+  a fixed 16-hex-digit digest of the rendered predicate and `_check`, shortened
+  to PostgreSQL's 63-byte identifier limit.
+
+Changing a struct rule's predicate therefore changes its name, and the
+generated migration drops the old constraint and adds the new one. Add
+`name = "..."` inside `validate(...)` only when something outside the schema
+refers to the constraint by name.
 
 `Option<T>` maps to a nullable column. Built-in `SqlType` mappings include
 `bool`, integer/float types, `String`, `Vec<u8>`, `uuid::Uuid`, common `chrono`
@@ -534,6 +584,12 @@ values follow the insert parameters; arithmetic updates refer to the existing
 target row. Conflict targets must correspond to database uniqueness rules.
 The runtime validates column membership and rejects empty or duplicate column
 lists and empty explicit update sets.
+
+Generated `create_*`, `update_*` and upsert methods first run the insert or
+update DTO's `api(validate(...))` rules and return the validation errors before
+any SQL executes. The dynamic `insert_<table>_fields`, `update_<tables>_where`
+and fluent builders take values rather than DTOs and do not run those rules;
+the table's `pg(validate(...))` CHECK constraints apply to every write.
 
 Generated CRUD preserves its DTO rules: optional insert fields can defer to
 database defaults; skipped fields are excluded; nullable patches distinguish
